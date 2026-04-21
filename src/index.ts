@@ -70,7 +70,7 @@ const alchemyNetworkConfigSchema = z.object({
         .object({
           networkChainId: z.number().int().positive().nullable().optional(),
           kebabCaseId: z.string().min(1),
-          supportedProducts: z.array(z.string()).optional(),
+          supportedProducts: z.array(z.string().nullable()).optional(),
         })
         .passthrough(),
     ),
