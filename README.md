@@ -1,6 +1,6 @@
 # RPC Racer Worker
 
-Cloudflare Worker that receives one JSON-RPC request and races multiple Chainlist RPC endpoints for a given chain ID.
+Proxy that races EVM RPC requests between providers.
 
 Production URL: `https://rpc.steer.fun`
 
