@@ -88,13 +88,13 @@ export default {
       return jsonResponse({
         ok: true,
         routes: {
-          race: "POST /v1/rpc/:chainId",
+          race: "POST /v1/:chainId",
           chain: "GET /v1/chains/:chainId",
         },
       });
     }
 
-    const raceMatch = url.pathname.match(/^\/v1\/rpc\/(\d+)$/);
+    const raceMatch = url.pathname.match(/^\/v1\/(\d+)$/);
     if (raceMatch !== null) {
       return handleRaceRpc({ env, request, chainIdRaw: raceMatch[1], query: url.searchParams });
     }

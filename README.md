@@ -6,10 +6,10 @@ Production URL: `https://rpc.steer.fun`
 
 ## URL format
 
-- `POST /v1/rpc/:chainId`
+- `POST /v1/:chainId`
   - Examples:
-    - Ethereum: `/v1/rpc/1`
-    - Base: `/v1/rpc/8453`
+    - Ethereum: `/v1/1`
+    - Base: `/v1/8453`
 - Optional query params:
   - `max` (1-25): max number of RPC URLs to race (default `8`)
   - `timeoutMs` (200-10000): timeout per endpoint (default `2000`)
@@ -17,7 +17,7 @@ Production URL: `https://rpc.steer.fun`
 ## Example
 
 ```bash
-curl -sS "http://127.0.0.1:8787/v1/rpc/1?max=10&timeoutMs=3000" \
+curl -sS "http://127.0.0.1:8787/v1/1?max=10&timeoutMs=3000" \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
@@ -25,7 +25,7 @@ curl -sS "http://127.0.0.1:8787/v1/rpc/1?max=10&timeoutMs=3000" \
 Example against production:
 
 ```bash
-curl -sS "https://rpc.steer.fun/v1/rpc/8453?max=8&timeoutMs=2000" \
+curl -sS "https://rpc.steer.fun/v1/8453?max=8&timeoutMs=2000" \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
