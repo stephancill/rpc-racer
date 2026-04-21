@@ -337,23 +337,57 @@ async function raceRequests({
         throw new Error("Not a JSON-RPC response");
       }
 
-      if (isJsonRpcRateLimitError({ value: parsed })) {
-        throw new Error("JSON-RPC rate limited");
-      }
-
-      return { url, body, status: response.status };
+      return {
+        url,
+        body,
+        status: response.status,
+        hasJsonRpcError: isJsonRpcError({ value: parsed }),
+      };
     } finally {
       clearTimeout(timeout);
     }
   });
 
-  try {
-    const winner = await Promise.any(attempts);
-    for (const controller of controllers) {
-      controller.abort("Winner selected");
+  const wrapped = attempts.map(async (attempt, index) => {
+    try {
+      const value = await attempt;
+      return { index, ok: true as const, value };
+    } catch (error) {
+      return { index, ok: false as const, error };
     }
-    return winner;
+  });
+
+  try {
+    const pending = new Set<number>(wrapped.map((_, index) => index));
+    let jsonRpcResponsesObserved = 0;
+    let jsonRpcErrorsObserved = 0;
+
+    while (pending.size > 0) {
+      const next = await Promise.race([...pending].map((index) => wrapped[index]));
+      pending.delete(next.index);
+
+      if (!next.ok) {
+        continue;
+      }
+
+      if (!next.value.hasJsonRpcError) {
+        abortAll({ controllers });
+        return { url: next.value.url, body: next.value.body, status: next.value.status };
+      }
+
+      jsonRpcResponsesObserved += 1;
+      jsonRpcErrorsObserved += 1;
+
+      if (jsonRpcResponsesObserved >= 5 && jsonRpcErrorsObserved >= 5) {
+        abortAll({ controllers });
+        return null;
+      }
+    }
+
+    abortAll({ controllers });
+    return null;
   } catch {
+    abortAll({ controllers });
     return null;
   }
 }
@@ -555,18 +589,19 @@ function isJsonRpcResponse({ value }: { value: unknown }): boolean {
   return candidate.jsonrpc === "2.0";
 }
 
-function isJsonRpcRateLimitError({ value }: { value: unknown }): boolean {
+function isJsonRpcError({ value }: { value: unknown }): boolean {
   if (typeof value !== "object" || value === null) {
     return false;
   }
 
   const candidate = value as { error?: unknown };
-  if (typeof candidate.error !== "object" || candidate.error === null) {
-    return false;
-  }
+  return typeof candidate.error === "object" && candidate.error !== null;
+}
 
-  const error = candidate.error as { code?: unknown };
-  return error.code === 429;
+function abortAll({ controllers }: { controllers: AbortController[] }): void {
+  for (const controller of controllers) {
+    controller.abort("Winner selected");
+  }
 }
 
 function providerFromUrl({ url }: { url: string }): string {
