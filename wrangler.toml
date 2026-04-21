@@ -1,0 +1,12 @@
+name = "rpc-racer"
+main = "src/index.ts"
+compatibility_date = "2026-04-21"
+workers_dev = false
+
+routes = [{ pattern = "rpc.steer.fun", custom_domain = true }]
+
+[vars]
+CHAINLIST_RPCS_URL = "https://chainlist.org/rpcs.json"
+ALCHEMY_NETWORK_CONFIG_URL = "https://app-api.alchemy.com/trpc/config.getNetworkConfig"
+DEFAULT_RACE_FANOUT = "8"
+DEFAULT_TIMEOUT_MS = "2000"
