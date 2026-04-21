@@ -8,6 +8,14 @@ routes = [
   { pattern = "evm.stupidtech.net", custom_domain = true },
 ]
 
+[[durable_objects.bindings]]
+name = "METRICS_DO"
+class_name = "MetricsDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MetricsDurableObject"]
+
 [vars]
 CHAINLIST_RPCS_URL = "https://chainlist.org/rpcs.json"
 ALCHEMY_NETWORK_CONFIG_URL = "https://app-api.alchemy.com/trpc/config.getNetworkConfig"

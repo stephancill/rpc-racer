@@ -5,6 +5,7 @@ type Env = {
   ALCHEMY_NETWORK_CONFIG_URL?: string;
   DEFAULT_TIMEOUT_MS?: string;
   ALCHEMY_API_KEY?: string;
+  METRICS_DO: DurableObjectNamespace;
 };
 
 type RpcEntry = {
@@ -35,6 +36,26 @@ type NormalizedChain = {
 type ChainRegistry = {
   byChainId: Map<number, NormalizedChain>;
   orderedChains: NormalizedChain[];
+};
+
+type RpcMetricsSnapshot = {
+  requestsServed: number;
+  errorResponses: number;
+  jsonRpcErrors: number;
+  fallbackResponses: number;
+  latencySumMs: number;
+  latencyCount: number;
+  latencyMaxMs: number;
+  latencyBuckets: Record<string, number>;
+  latencyRecentMs: number[];
+};
+
+type RpcMetricsRecord = {
+  requestCount: number;
+  errorCount: number;
+  jsonRpcErrorCount: number;
+  fallbackCount: number;
+  latencyMs: number;
 };
 
 const DAY_IN_SECONDS = 86_400;
@@ -91,19 +112,21 @@ let chainMemoryCache: { expiresAt: number; registry: ChainRegistry } | null = nu
 let alchemyMemoryCache: { expiresAt: number; slugByChainId: Map<number, string> } | null = null;
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/") {
       const acceptHeader = request.headers.get("accept") ?? "";
+      const metrics = await getRpcMetricsSnapshot({ env });
       if (acceptHeader.includes("application/json")) {
         return jsonResponse({
           ok: true,
           routes: {
-            race: "POST /v1/:chain",
+            race: "POST /v1/:chainId",
             chains: "GET /v1/chains",
             chain: "GET /v1/chains/:chainId",
           },
+          metrics,
         });
       }
 
@@ -117,12 +140,20 @@ export default {
   </head>
   <body>
     <h1>evm.stupidtech.net</h1>
-    <p>Proxy that races EVM RPC requests between providers.</p>
+    <p>A fast and reliable public EVM RPC.</p>
     <h2>Endpoints</h2>
     <ul>
-      <li><code>POST /v1/:chain</code></li>
+      <li><code>POST /v1/:chainId</code></li>
       <li><code>GET /v1/chains</code></li>
       <li><code>GET /v1/chains/:chainId</code></li>
+    </ul>
+    <h2>Stats</h2>
+    <ul>
+      <li><strong>Requests served:</strong> ${metrics.requestsServed.toLocaleString("en-US")}</li>
+      <li><strong>Error rate:</strong> ${metrics.errorRatePct.toFixed(2)}%</li>
+      <li><strong>Average latency:</strong> ${metrics.averageLatencyMs.toFixed(2)}ms</li>
+      <li><strong>P95 latency:</strong> ${metrics.p95LatencyMs.toFixed(2)}ms</li>
+      <li><strong>P99 latency:</strong> ${metrics.p99LatencyMs.toFixed(2)}ms</li>
     </ul>
     <p>
       <a href="https://github.com/stephancill/rpc-racer">github</a>
@@ -149,6 +180,7 @@ export default {
     if (raceMatch !== null) {
       return handleRaceRpc({
         env,
+        ctx,
         request,
         chainSelectorRaw: decodeURIComponent(raceMatch[1]),
         query: url.searchParams,
@@ -216,36 +248,67 @@ async function handleListChains({
 
 async function handleRaceRpc({
   env,
+  ctx,
   request,
   chainSelectorRaw,
   query,
 }: {
   env: Env;
+  ctx: ExecutionContext;
   request: Request;
   chainSelectorRaw: string;
   query: URLSearchParams;
 }): Promise<Response> {
+  const startedAt = performance.now();
   if (request.method !== "POST") {
-    return jsonResponse({ error: "Use POST with a JSON-RPC body" }, { status: 405 });
+    return finalizeRpcResponse({
+      env,
+      ctx,
+      startedAt,
+      response: jsonResponse({ error: "Use POST with a JSON-RPC body" }, { status: 405 }),
+      fallbackUsed: false,
+      jsonRpcError: false,
+    });
   }
 
   const parsedQuery = querySchema.safeParse({
     timeoutMs: query.get("timeoutMs") ?? undefined,
   });
   if (!parsedQuery.success) {
-    return jsonResponse({ error: "Invalid query params" }, { status: 400 });
+    return finalizeRpcResponse({
+      env,
+      ctx,
+      startedAt,
+      response: jsonResponse({ error: "Invalid query params" }, { status: 400 }),
+      fallbackUsed: false,
+      jsonRpcError: false,
+    });
   }
 
   let parsedBody: unknown;
   try {
     parsedBody = await request.json();
   } catch {
-    return jsonResponse({ error: "Request body must be valid JSON" }, { status: 400 });
+    return finalizeRpcResponse({
+      env,
+      ctx,
+      startedAt,
+      response: jsonResponse({ error: "Request body must be valid JSON" }, { status: 400 }),
+      fallbackUsed: false,
+      jsonRpcError: false,
+    });
   }
 
   const validatedBody = jsonRpcSchema.safeParse(parsedBody);
   if (!validatedBody.success) {
-    return jsonResponse({ error: "Body must be a JSON-RPC 2.0 request" }, { status: 400 });
+    return finalizeRpcResponse({
+      env,
+      ctx,
+      startedAt,
+      response: jsonResponse({ error: "Body must be a JSON-RPC 2.0 request" }, { status: 400 }),
+      fallbackUsed: false,
+      jsonRpcError: false,
+    });
   }
 
   const registry = await getChainRegistry({ env });
@@ -256,7 +319,14 @@ async function handleRaceRpc({
     registry,
   });
   if (chain === undefined) {
-    return jsonResponse({ error: "Unknown chain" }, { status: 404 });
+    return finalizeRpcResponse({
+      env,
+      ctx,
+      startedAt,
+      response: jsonResponse({ error: "Unknown chain" }, { status: 404 }),
+      fallbackUsed: false,
+      jsonRpcError: false,
+    });
   }
 
   const defaultTimeoutMs = parsePositiveInt({ value: env.DEFAULT_TIMEOUT_MS, fallback: 2_500 });
@@ -265,7 +335,14 @@ async function handleRaceRpc({
 
   const candidateUrls = selectRandomRpcUrls({ rpcUrls: chain.rpcUrls, count: RANDOM_RACE_FANOUT });
   if (candidateUrls.length === 0) {
-    return jsonResponse({ error: "No usable HTTP RPC URLs for chain" }, { status: 502 });
+    return finalizeRpcResponse({
+      env,
+      ctx,
+      startedAt,
+      response: jsonResponse({ error: "No usable HTTP RPC URLs for chain" }, { status: 502 }),
+      fallbackUsed: false,
+      jsonRpcError: false,
+    });
   }
 
   const requestBody = JSON.stringify(validatedBody.data);
@@ -280,7 +357,7 @@ async function handleRaceRpc({
 
     if (alchemy !== null) {
       const provider = providerFromUrl({ url: alchemy.url });
-      return new Response(alchemy.body, {
+      const response = new Response(alchemy.body, {
         status: alchemy.status,
         headers: {
           "content-type": "application/json; charset=utf-8",
@@ -291,21 +368,37 @@ async function handleRaceRpc({
           "x-rpc-fallback": "alchemy",
         },
       });
+
+      return finalizeRpcResponse({
+        env,
+        ctx,
+        startedAt,
+        response,
+        fallbackUsed: true,
+        jsonRpcError: isJsonRpcError({ value: safeJsonParse({ value: alchemy.body }) }),
+      });
     }
 
-    return jsonResponse(
-      {
-        error: "All RPC endpoints failed",
-        chainId: chain.chainId,
-        tried: candidateUrls.length,
-        alchemyAttempted: Boolean(env.ALCHEMY_API_KEY && env.ALCHEMY_API_KEY.trim().length > 0),
-      },
-      { status: 502 },
-    );
+    return finalizeRpcResponse({
+      env,
+      ctx,
+      startedAt,
+      response: jsonResponse(
+        {
+          error: "All RPC endpoints failed",
+          chainId: chain.chainId,
+          tried: candidateUrls.length,
+          alchemyAttempted: Boolean(env.ALCHEMY_API_KEY && env.ALCHEMY_API_KEY.trim().length > 0),
+        },
+        { status: 502 },
+      ),
+      fallbackUsed: false,
+      jsonRpcError: false,
+    });
   }
 
   const provider = providerFromUrl({ url: winner.url });
-  return new Response(winner.body, {
+  const response = new Response(winner.body, {
     status: winner.status,
     headers: {
       "content-type": "application/json; charset=utf-8",
@@ -314,6 +407,15 @@ async function handleRaceRpc({
       "x-rpc-chain-id": String(chain.chainId),
       "x-rpc-chain-name": chain.name,
     },
+  });
+
+  return finalizeRpcResponse({
+    env,
+    ctx,
+    startedAt,
+    response,
+    fallbackUsed: false,
+    jsonRpcError: isJsonRpcError({ value: safeJsonParse({ value: winner.body }) }),
   });
 }
 
@@ -762,6 +864,151 @@ function providerFromUrl({ url }: { url: string }): string {
   }
 }
 
+async function getRpcMetricsSnapshot({
+  env,
+}: {
+  env: Env;
+}): Promise<
+  RpcMetricsSnapshot & {
+    averageLatencyMs: number;
+    errorRatePct: number;
+    p95LatencyMs: number;
+    p99LatencyMs: number;
+  }
+> {
+  try {
+    const stub = env.METRICS_DO.get(env.METRICS_DO.idFromName("global"));
+    const response = await stub.fetch("https://metrics.internal/snapshot");
+    if (!response.ok) {
+      throw new Error("Failed to read metrics snapshot");
+    }
+
+    const snapshot = (await response.json()) as RpcMetricsSnapshot;
+    const sorted = [...snapshot.latencyRecentMs].sort((left, right) => left - right);
+    const p95 = percentile({ values: sorted, quantile: 0.95 });
+    const p99 = percentile({ values: sorted, quantile: 0.99 });
+    return {
+      ...snapshot,
+      averageLatencyMs:
+        snapshot.latencyCount === 0 ? 0 : snapshot.latencySumMs / snapshot.latencyCount,
+      errorRatePct:
+        snapshot.requestsServed === 0
+          ? 0
+          : (snapshot.errorResponses / snapshot.requestsServed) * 100,
+      p95LatencyMs: p95,
+      p99LatencyMs: p99,
+    };
+  } catch {
+    const fallback = defaultMetricsSnapshot();
+    return {
+      ...fallback,
+      averageLatencyMs: 0,
+      errorRatePct: 0,
+      p95LatencyMs: 0,
+      p99LatencyMs: 0,
+    };
+  }
+}
+
+function finalizeRpcResponse({
+  env,
+  ctx,
+  startedAt,
+  response,
+  fallbackUsed,
+  jsonRpcError,
+}: {
+  env: Env;
+  ctx: ExecutionContext;
+  startedAt: number;
+  response: Response;
+  fallbackUsed: boolean;
+  jsonRpcError: boolean;
+}): Response {
+  const latencyMs = Math.max(0, performance.now() - startedAt);
+  const record: RpcMetricsRecord = {
+    requestCount: 1,
+    errorCount: response.status >= 400 ? 1 : 0,
+    jsonRpcErrorCount: jsonRpcError ? 1 : 0,
+    fallbackCount: fallbackUsed ? 1 : 0,
+    latencyMs,
+  };
+
+  ctx.waitUntil(recordRpcMetrics({ env, record }));
+  return response;
+}
+
+async function recordRpcMetrics({
+  env,
+  record,
+}: {
+  env: Env;
+  record: RpcMetricsRecord;
+}): Promise<void> {
+  const stub = env.METRICS_DO.get(env.METRICS_DO.idFromName("global"));
+  await stub.fetch("https://metrics.internal/record", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(record),
+  });
+}
+
+function defaultMetricsSnapshot(): RpcMetricsSnapshot {
+  return {
+    requestsServed: 0,
+    errorResponses: 0,
+    jsonRpcErrors: 0,
+    fallbackResponses: 0,
+    latencySumMs: 0,
+    latencyCount: 0,
+    latencyMaxMs: 0,
+    latencyBuckets: {
+      "0-100": 0,
+      "100-250": 0,
+      "250-500": 0,
+      "500-1000": 0,
+      "1000-2000": 0,
+      "2000+": 0,
+    },
+    latencyRecentMs: [],
+  };
+}
+
+function percentile({ values, quantile }: { values: number[]; quantile: number }): number {
+  if (values.length === 0) {
+    return 0;
+  }
+
+  const index = Math.min(values.length - 1, Math.floor((values.length - 1) * quantile));
+  return values[index] ?? 0;
+}
+
+function latencyBucket({
+  latencyMs,
+}: {
+  latencyMs: number;
+}): keyof RpcMetricsSnapshot["latencyBuckets"] {
+  if (latencyMs < 100) {
+    return "0-100";
+  }
+  if (latencyMs < 250) {
+    return "100-250";
+  }
+  if (latencyMs < 500) {
+    return "250-500";
+  }
+  if (latencyMs < 1000) {
+    return "500-1000";
+  }
+  if (latencyMs < 2000) {
+    return "1000-2000";
+  }
+
+  return "2000+";
+}
+
 function jsonResponse(body: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(body), {
     ...init,
@@ -780,4 +1027,65 @@ function htmlResponse({ html, init }: { html: string; init?: ResponseInit }): Re
       ...init?.headers,
     },
   });
+}
+
+export class MetricsDurableObject {
+  private readonly state: DurableObjectState;
+
+  constructor(state: DurableObjectState) {
+    this.state = state;
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (request.method === "GET" && url.pathname === "/snapshot") {
+      const snapshot = await this.readSnapshot();
+      return jsonResponse(snapshot);
+    }
+
+    if (request.method === "POST" && url.pathname === "/record") {
+      let record: RpcMetricsRecord;
+      try {
+        record = (await request.json()) as RpcMetricsRecord;
+      } catch {
+        return jsonResponse({ error: "Invalid metrics payload" }, { status: 400 });
+      }
+
+      const snapshot = await this.readSnapshot();
+      snapshot.requestsServed += Math.max(0, Math.trunc(record.requestCount));
+      snapshot.errorResponses += Math.max(0, Math.trunc(record.errorCount));
+      snapshot.jsonRpcErrors += Math.max(0, Math.trunc(record.jsonRpcErrorCount));
+      snapshot.fallbackResponses += Math.max(0, Math.trunc(record.fallbackCount));
+      snapshot.latencyCount += Math.max(0, Math.trunc(record.requestCount));
+      snapshot.latencySumMs += Math.max(0, record.latencyMs);
+      snapshot.latencyMaxMs = Math.max(snapshot.latencyMaxMs, Math.max(0, record.latencyMs));
+      snapshot.latencyRecentMs.push(Math.max(0, record.latencyMs));
+      if (snapshot.latencyRecentMs.length > 2000) {
+        snapshot.latencyRecentMs.splice(0, snapshot.latencyRecentMs.length - 2000);
+      }
+
+      const bucket = latencyBucket({ latencyMs: Math.max(0, record.latencyMs) });
+      snapshot.latencyBuckets[bucket] = (snapshot.latencyBuckets[bucket] ?? 0) + 1;
+
+      await this.state.storage.put("snapshot", snapshot);
+      return jsonResponse({ ok: true });
+    }
+
+    return jsonResponse({ error: "Not found" }, { status: 404 });
+  }
+
+  private async readSnapshot(): Promise<RpcMetricsSnapshot> {
+    const snapshot = await this.state.storage.get<RpcMetricsSnapshot>("snapshot");
+    if (snapshot !== undefined) {
+      if (!Array.isArray(snapshot.latencyRecentMs)) {
+        snapshot.latencyRecentMs = [];
+      }
+      return snapshot;
+    }
+
+    const initial = defaultMetricsSnapshot();
+    await this.state.storage.put("snapshot", initial);
+    return initial;
+  }
 }
