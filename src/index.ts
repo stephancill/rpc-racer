@@ -337,6 +337,10 @@ async function raceRequests({
         throw new Error("Not a JSON-RPC response");
       }
 
+      if (isJsonRpcRateLimitError({ value: parsed })) {
+        throw new Error("JSON-RPC rate limited");
+      }
+
       return { url, body, status: response.status };
     } finally {
       clearTimeout(timeout);
@@ -549,6 +553,20 @@ function isJsonRpcResponse({ value }: { value: unknown }): boolean {
 
   const candidate = value as { jsonrpc?: unknown };
   return candidate.jsonrpc === "2.0";
+}
+
+function isJsonRpcRateLimitError({ value }: { value: unknown }): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as { error?: unknown };
+  if (typeof candidate.error !== "object" || candidate.error === null) {
+    return false;
+  }
+
+  const error = candidate.error as { code?: unknown };
+  return error.code === 429;
 }
 
 function providerFromUrl({ url }: { url: string }): string {
