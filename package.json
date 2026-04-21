@@ -8,7 +8,8 @@
     "deploy": "wrangler deploy",
     "lint": "bunx oxlint src",
     "format": "bunx oxfmt --write .",
-    "check": "bun run lint && bun run format"
+    "check": "bun run lint && bun run format",
+    "benchmark": "bun scripts/benchmark.mjs"
   },
   "dependencies": {
     "zod": "^3.24.2"

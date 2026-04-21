@@ -3,7 +3,6 @@ import { z } from "zod";
 type Env = {
   CHAINLIST_RPCS_URL?: string;
   ALCHEMY_NETWORK_CONFIG_URL?: string;
-  DEFAULT_RACE_FANOUT?: string;
   DEFAULT_TIMEOUT_MS?: string;
   ALCHEMY_API_KEY?: string;
 };
@@ -16,7 +15,10 @@ type RpcEntry = {
 type ChainEntry = {
   chainId: number;
   name: string;
+  chain?: string;
   shortName?: string;
+  chainSlug?: string;
+  isTestnet?: boolean;
   rpc: Array<RpcEntry | string>;
 };
 
@@ -24,10 +26,19 @@ type NormalizedChain = {
   chainId: number;
   name: string;
   shortName?: string;
+  chainSlug?: string;
+  isTestnet: boolean;
+  aliases: string[];
   rpcUrls: string[];
 };
 
+type ChainRegistry = {
+  byChainId: Map<number, NormalizedChain>;
+  orderedChains: NormalizedChain[];
+};
+
 const DAY_IN_SECONDS = 86_400;
+const RANDOM_RACE_FANOUT = 10;
 const DEFAULT_RPCS_URL = "https://chainlist.org/rpcs.json";
 const DEFAULT_ALCHEMY_NETWORK_CONFIG_URL =
   "https://app-api.alchemy.com/trpc/config.getNetworkConfig";
@@ -39,7 +50,6 @@ const routeSchema = z.object({
 });
 
 const querySchema = z.object({
-  max: z.coerce.number().int().min(1).max(25).optional(),
   timeoutMs: z.coerce.number().int().min(200).max(10_000).optional(),
 });
 
@@ -77,7 +87,7 @@ const alchemyNetworkConfigSchema = z.object({
   }),
 });
 
-let chainMemoryCache: { expiresAt: number; byChainId: Map<number, NormalizedChain> } | null = null;
+let chainMemoryCache: { expiresAt: number; registry: ChainRegistry } | null = null;
 let alchemyMemoryCache: { expiresAt: number; slugByChainId: Map<number, string> } | null = null;
 
 export default {
@@ -85,23 +95,64 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/") {
-      return jsonResponse({
-        ok: true,
-        routes: {
-          race: "POST /v1/:chainId",
-          chain: "GET /v1/chains/:chainId",
-        },
+      const acceptHeader = request.headers.get("accept") ?? "";
+      if (acceptHeader.includes("application/json")) {
+        return jsonResponse({
+          ok: true,
+          routes: {
+            race: "POST /v1/:chain",
+            chains: "GET /v1/chains",
+            chain: "GET /v1/chains/:chainId",
+          },
+        });
+      }
+
+      return htmlResponse({
+        html: `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>rpc racer</title>
+  </head>
+  <body>
+    <h1>rpc racer</h1>
+    <p>Proxy that races EVM RPC requests between providers.</p>
+    <h2>Endpoints</h2>
+    <ul>
+      <li><code>POST /v1/:chain</code></li>
+      <li><code>GET /v1/chains</code></li>
+      <li><code>GET /v1/chains/:chainId</code></li>
+    </ul>
+    <p>
+      <a href="https://github.com/stephancill/rpc-racer">github</a>
+      •
+      <a href="https://x.com/stephancill">twitter</a>
+      •
+      <a href="https://stupidtech.net">stupidtech.net</a>
+    </p>
+  </body>
+</html>`,
       });
     }
 
-    const raceMatch = url.pathname.match(/^\/v1\/(\d+)$/);
-    if (raceMatch !== null) {
-      return handleRaceRpc({ env, request, chainIdRaw: raceMatch[1], query: url.searchParams });
+    if (request.method === "GET" && url.pathname === "/v1/chains") {
+      return handleListChains({ env, query: url.searchParams });
     }
 
     const chainMatch = url.pathname.match(/^\/v1\/chains\/(\d+)$/);
     if (chainMatch !== null) {
       return handleGetChain({ env, chainIdRaw: chainMatch[1] });
+    }
+
+    const raceMatch = url.pathname.match(/^\/v1\/([^/]+)$/);
+    if (raceMatch !== null) {
+      return handleRaceRpc({
+        env,
+        request,
+        chainSelectorRaw: decodeURIComponent(raceMatch[1]),
+        query: url.searchParams,
+      });
     }
 
     return jsonResponse({ error: "Not found" }, { status: 404 });
@@ -120,8 +171,8 @@ async function handleGetChain({
     return jsonResponse({ error: "Invalid chainId" }, { status: 400 });
   }
 
-  const chainMap = await getChainMap({ env });
-  const chain = chainMap.get(parsedRoute.data.chainId);
+  const registry = await getChainRegistry({ env });
+  const chain = registry.byChainId.get(parsedRoute.data.chainId);
 
   if (chain === undefined) {
     return jsonResponse({ error: "Unknown chainId" }, { status: 404 });
@@ -130,28 +181,55 @@ async function handleGetChain({
   return jsonResponse(chain);
 }
 
+async function handleListChains({
+  env,
+  query,
+}: {
+  env: Env;
+  query: URLSearchParams;
+}): Promise<Response> {
+  const includeRpcUrls = query.has("includeRpcUrls");
+  const registry = await getChainRegistry({ env });
+
+  const chains = registry.orderedChains.map((chain) => {
+    if (includeRpcUrls) {
+      return chain;
+    }
+
+    return {
+      chainId: chain.chainId,
+      name: chain.name,
+      shortName: chain.shortName,
+      chainSlug: chain.chainSlug,
+      isTestnet: chain.isTestnet,
+      aliases: chain.aliases,
+      rpcUrlCount: chain.rpcUrls.length,
+    };
+  });
+
+  return jsonResponse({
+    total: chains.length,
+    includeRpcUrls,
+    chains,
+  });
+}
+
 async function handleRaceRpc({
   env,
   request,
-  chainIdRaw,
+  chainSelectorRaw,
   query,
 }: {
   env: Env;
   request: Request;
-  chainIdRaw: string;
+  chainSelectorRaw: string;
   query: URLSearchParams;
 }): Promise<Response> {
   if (request.method !== "POST") {
     return jsonResponse({ error: "Use POST with a JSON-RPC body" }, { status: 405 });
   }
 
-  const parsedRoute = routeSchema.safeParse({ chainId: chainIdRaw });
-  if (!parsedRoute.success) {
-    return jsonResponse({ error: "Invalid chainId" }, { status: 400 });
-  }
-
   const parsedQuery = querySchema.safeParse({
-    max: query.get("max") ?? undefined,
     timeoutMs: query.get("timeoutMs") ?? undefined,
   });
   if (!parsedQuery.success) {
@@ -170,19 +248,22 @@ async function handleRaceRpc({
     return jsonResponse({ error: "Body must be a JSON-RPC 2.0 request" }, { status: 400 });
   }
 
-  const chainMap = await getChainMap({ env });
-  const chain = chainMap.get(parsedRoute.data.chainId);
+  const registry = await getChainRegistry({ env });
+  const preferTestnet = query.has("testnet");
+  const chain = resolveChainSelector({
+    selector: chainSelectorRaw,
+    preferTestnet,
+    registry,
+  });
   if (chain === undefined) {
-    return jsonResponse({ error: "Unknown chainId" }, { status: 404 });
+    return jsonResponse({ error: "Unknown chain" }, { status: 404 });
   }
 
-  const defaultFanout = parsePositiveInt({ value: env.DEFAULT_RACE_FANOUT, fallback: 8 });
   const defaultTimeoutMs = parsePositiveInt({ value: env.DEFAULT_TIMEOUT_MS, fallback: 2_500 });
 
-  const max = parsedQuery.data.max ?? defaultFanout;
   const timeoutMs = parsedQuery.data.timeoutMs ?? defaultTimeoutMs;
 
-  const candidateUrls = chain.rpcUrls.slice(0, max);
+  const candidateUrls = selectRandomRpcUrls({ rpcUrls: chain.rpcUrls, count: RANDOM_RACE_FANOUT });
   if (candidateUrls.length === 0) {
     return jsonResponse({ error: "No usable HTTP RPC URLs for chain" }, { status: 502 });
   }
@@ -392,10 +473,10 @@ async function raceRequests({
   }
 }
 
-async function getChainMap({ env }: { env: Env }): Promise<Map<number, NormalizedChain>> {
+async function getChainRegistry({ env }: { env: Env }): Promise<ChainRegistry> {
   const now = Date.now();
   if (chainMemoryCache !== null && now < chainMemoryCache.expiresAt) {
-    return chainMemoryCache.byChainId;
+    return chainMemoryCache.registry;
   }
 
   const cache = caches.default;
@@ -441,22 +522,81 @@ async function getChainMap({ env }: { env: Env }): Promise<Map<number, Normalize
   }
 
   const byChainId = new Map<number, NormalizedChain>();
+  const orderedChains: NormalizedChain[] = [];
   for (const chain of validated.data as ChainEntry[]) {
     const rpcUrls = normalizeRpcUrls({ rpcList: chain.rpc });
-    byChainId.set(chain.chainId, {
+    const normalized = {
       chainId: chain.chainId,
       name: chain.name,
+      chainSlug: chain.chainSlug,
       shortName: chain.shortName,
+      isTestnet: Boolean(chain.isTestnet),
+      aliases: buildChainAliases({ chain }),
       rpcUrls,
-    });
+    };
+
+    byChainId.set(chain.chainId, normalized);
+    orderedChains.push(normalized);
   }
 
+  const registry = { byChainId, orderedChains };
   chainMemoryCache = {
     expiresAt: now + DAY_IN_SECONDS * 1000,
-    byChainId,
+    registry,
   };
 
-  return byChainId;
+  return registry;
+}
+
+function resolveChainSelector({
+  selector,
+  preferTestnet,
+  registry,
+}: {
+  selector: string;
+  preferTestnet: boolean;
+  registry: ChainRegistry;
+}): NormalizedChain | undefined {
+  const trimmedSelector = selector.trim();
+  const numeric = Number.parseInt(trimmedSelector, 10);
+  if (Number.isFinite(numeric) && String(numeric) === trimmedSelector) {
+    return registry.byChainId.get(numeric);
+  }
+
+  const normalizedSelector = trimmedSelector.toLowerCase();
+  const matching = registry.orderedChains.filter((chain) =>
+    chain.aliases.some(
+      (alias) =>
+        alias === normalizedSelector ||
+        alias.startsWith(`${normalizedSelector}-`) ||
+        alias.startsWith(`${normalizedSelector} `),
+    ),
+  );
+
+  if (matching.length === 0) {
+    return undefined;
+  }
+
+  if (preferTestnet) {
+    return matching.find((chain) => chain.isTestnet) ?? undefined;
+  }
+
+  return matching.find((chain) => !chain.isTestnet) ?? undefined;
+}
+
+function buildChainAliases({ chain }: { chain: ChainEntry }): string[] {
+  const aliases = new Set<string>();
+  aliases.add(String(chain.chainId));
+
+  const values = [chain.name, chain.shortName, chain.chainSlug, chain.chain];
+  for (const value of values) {
+    if (value === undefined || value.trim().length === 0) {
+      continue;
+    }
+    aliases.add(value.trim().toLowerCase());
+  }
+
+  return [...aliases];
 }
 
 async function getAlchemyNetworkSlugMap({ env }: { env: Env }): Promise<Map<number, string>> {
@@ -553,6 +693,16 @@ function normalizeRpcUrls({ rpcList }: { rpcList: Array<RpcEntry | string> }): s
   return [...urls];
 }
 
+function selectRandomRpcUrls({ rpcUrls, count }: { rpcUrls: string[]; count: number }): string[] {
+  const shuffled = [...rpcUrls];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const randomIndex = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[randomIndex]] = [shuffled[randomIndex], shuffled[index]];
+  }
+
+  return shuffled.slice(0, count);
+}
+
 function parsePositiveInt({
   value,
   fallback,
@@ -617,6 +767,16 @@ function jsonResponse(body: unknown, init?: ResponseInit): Response {
     ...init,
     headers: {
       "content-type": "application/json; charset=utf-8",
+      ...init?.headers,
+    },
+  });
+}
+
+function htmlResponse({ html, init }: { html: string; init?: ResponseInit }): Response {
+  return new Response(html, {
+    ...init,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
       ...init?.headers,
     },
   });

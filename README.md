@@ -1,79 +1,107 @@
-# RPC Racer Worker
+# RPC Racer API
 
-Proxy that races EVM RPC requests between providers.
+Production base URL: `https://rpc.steer.fun`
 
-Production URL: `https://rpc.steer.fun`
+## Overview
 
-## URL format
+`rpc.steer.fun` is a JSON-RPC proxy that races multiple public RPC providers and returns the first successful response.
 
-- `POST /v1/:chainId`
-  - Examples:
-    - Ethereum: `/v1/1`
-    - Base: `/v1/8453`
-- Optional query params:
-  - `max` (1-25): max number of RPC URLs to race (default `8`)
-  - `timeoutMs` (200-10000): timeout per endpoint (default `2000`)
+- Races 10 random HTTPS RPC endpoints per request
+- Falls back to Alchemy when race conditions are not satisfied
+- Caches chain metadata from Chainlist and Alchemy network config
 
-## Example
+## Endpoints
+
+- `GET /`
+  - Basic service metadata and route map.
+
+- `POST /v1/:chain`
+  - Proxies one JSON-RPC request.
+  - `:chain` can be:
+    - numeric chain ID (for example `1`, `8453`, `42161`)
+    - chain alias (for example `ethereum`, `base`, `arbitrum`, `tempo`)
+  - Query params:
+    - `timeoutMs` (optional, integer `200`-`10000`, default `2000`)
+    - `testnet` (optional, any present value enables testnet selection)
+
+- `GET /v1/chains`
+  - Lists cached chain entries.
+  - Query params:
+    - `includeRpcUrls` (optional, any present value includes full `rpcUrls` arrays)
+
+- `GET /v1/chains/:chainId`
+  - Returns one chain entry by numeric chain ID.
+
+## Chain Selection
+
+For `POST /v1/:chain` when `:chain` is a name/alias:
+
+- default: selects the first non-testnet match
+- with `?testnet`: selects the first testnet match
+
+## Request Format
+
+`POST /v1/:chain` expects a JSON-RPC 2.0 request body.
+
+Example:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "eth_blockNumber",
+  "params": [],
+  "id": 1
+}
+```
+
+## Response Headers
+
+- `x-rpc-provider`: hostname of winning upstream provider
+- `x-rpc-upstream`: full winning upstream URL
+- `x-rpc-chain-id`: resolved chain ID
+- `x-rpc-chain-name`: resolved chain name
+- `x-rpc-fallback`: present with value `alchemy` when fallback was used
+
+## Example Calls
+
+Mainnet by alias:
 
 ```bash
-curl -sS "http://127.0.0.1:8787/v1/1?max=10&timeoutMs=3000" \
+curl -sS "https://rpc.steer.fun/v1/ethereum?timeoutMs=2000" \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
 
-Example against production:
+Testnet selection by alias:
 
 ```bash
-curl -sS "https://rpc.steer.fun/v1/8453?max=8&timeoutMs=2000" \
+curl -sS "https://rpc.steer.fun/v1/ethereum?testnet=1" \
   -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+  --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}'
 ```
 
-## Response headers
-
-- `x-rpc-provider`: hostname of winning provider
-- `x-rpc-upstream`: full upstream URL used
-- `x-rpc-chain-id`: chain ID requested
-- `x-rpc-chain-name`: human-readable chain name
-- `x-rpc-fallback`: set to `alchemy` when fallback was used
-
-## Chain source + refresh
-
-- Source: `https://chainlist.org/rpcs.json`
-- Refresh cadence: every 24 hours using cache TTL (`86400s`) plus in-memory cache.
-- Alchemy network source (for fallback chain-ID mapping): `https://app-api.alchemy.com/trpc/config.getNetworkConfig`
-- Alchemy config refresh cadence: every 24 hours using the same cache strategy.
-
-## Fallback behavior
-
-- If all raced endpoints fail, the worker tries one Alchemy RPC endpoint for the same chain.
-- Set your API key as a Worker secret:
+List chains:
 
 ```bash
-bunx wrangler secret put ALCHEMY_API_KEY
+curl -sS "https://rpc.steer.fun/v1/chains"
 ```
 
-- Fallback chain support is discovered dynamically from Alchemy config by `networkChainId` -> `kebabCaseId`, so no hardcoded chain list.
+## Error Semantics
 
-## Run
+- `400`: invalid chain selector, query params, or JSON body
+- `404`: unknown route or unknown chain
+- `405`: method not allowed for endpoint
+- `502`: no successful race result and fallback did not produce a result
 
-```bash
-bun install
-bun run dev
-```
+## Contributing
 
-## Deploy
+1. Install dependencies: `bun install`
+2. Run local dev server: `bun run dev`
+3. Run checks before pushing: `bun run check`
+4. Optional benchmark: `bun run benchmark`
+5. Open a PR to `main`
 
-```bash
-bun run deploy
-```
+Notes:
 
-## GitHub Actions deployment
-
-This repo includes `.github/workflows/deploy.yml`, which deploys on every commit to `main`.
-
-Required repository secrets:
-
-- `CLOUDFLARE_API_TOKEN`: Cloudflare API token with Workers edit permissions
-- `CLOUDFLARE_ACCOUNT_ID`: Cloudflare account ID for this worker
+- Deployments run automatically on commits to `main` via GitHub Actions.
+- Keep changes focused and include tests/verification steps in PR descriptions.
