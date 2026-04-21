@@ -113,10 +113,10 @@ export default {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>rpc racer</title>
+    <title>evm.stupidtech.net</title>
   </head>
   <body>
-    <h1>rpc racer</h1>
+    <h1>evm.stupidtech.net</h1>
     <p>Proxy that races EVM RPC requests between providers.</p>
     <h2>Endpoints</h2>
     <ul>
