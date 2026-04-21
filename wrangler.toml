@@ -3,7 +3,10 @@ main = "src/index.ts"
 compatibility_date = "2026-04-21"
 workers_dev = false
 
-routes = [{ pattern = "rpc.steer.fun", custom_domain = true }]
+routes = [
+  { pattern = "rpc.steer.fun", custom_domain = true },
+  { pattern = "evm.stupidtech.net", custom_domain = true },
+]
 
 [vars]
 CHAINLIST_RPCS_URL = "https://chainlist.org/rpcs.json"
