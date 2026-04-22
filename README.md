@@ -64,6 +64,14 @@ Example:
 
 ## Example Calls
 
+Mainnet by chain ID:
+
+```bash
+curl -sS "https://rpc.steer.fun/v1/1?timeoutMs=2000" \
+  -H 'content-type: application/json' \
+  --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+```
+
 Mainnet by alias:
 
 ```bash

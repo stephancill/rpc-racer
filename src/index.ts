@@ -147,6 +147,15 @@ export default {
       <li><code>GET /v1/chains</code></li>
       <li><code>GET /v1/chains/:chainId</code></li>
     </ul>
+    <h2>Examples</h2>
+    <p>By chain ID:</p>
+    <pre><code>curl -sS "https://evm.stupidtech.net/v1/1" \\
+  -H 'content-type: application/json' \\
+  --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'</code></pre>
+    <p>By alias:</p>
+    <pre><code>curl -sS "https://evm.stupidtech.net/v1/ethereum" \\
+  -H 'content-type: application/json' \\
+  --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'</code></pre>
     <h2>Stats</h2>
     <ul>
       <li><strong>Requests served:</strong> ${metrics.requestsServed.toLocaleString("en-US")}</li>
@@ -864,11 +873,7 @@ function providerFromUrl({ url }: { url: string }): string {
   }
 }
 
-async function getRpcMetricsSnapshot({
-  env,
-}: {
-  env: Env;
-}): Promise<
+async function getRpcMetricsSnapshot({ env }: { env: Env }): Promise<
   RpcMetricsSnapshot & {
     averageLatencyMs: number;
     errorRatePct: number;
