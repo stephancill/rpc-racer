@@ -355,14 +355,18 @@ async function handleRaceRpc({
   }
 
   const requestBody = JSON.stringify(validatedBody.data);
-  const winner = await raceRequests({ candidateUrls, requestBody, timeoutMs });
-  if (winner === null) {
-    const alchemy = await tryAlchemyFallback({
-      chainId: chain.chainId,
-      requestBody,
-      env,
-      timeoutMs,
-    });
+  const raceResult = await raceRequests({ candidateUrls, requestBody, timeoutMs });
+  if (raceResult.winner === null) {
+    const hasAlchemyApiKey = Boolean(env.ALCHEMY_API_KEY && env.ALCHEMY_API_KEY.trim().length > 0);
+    const shouldTryAlchemyFallback = raceResult.shouldTryAlchemyFallback && hasAlchemyApiKey;
+    const alchemy = shouldTryAlchemyFallback
+      ? await tryAlchemyFallback({
+          chainId: chain.chainId,
+          requestBody,
+          env,
+          timeoutMs,
+        })
+      : null;
 
     if (alchemy !== null) {
       const provider = providerFromUrl({ url: alchemy.url });
@@ -397,7 +401,7 @@ async function handleRaceRpc({
           error: "All RPC endpoints failed",
           chainId: chain.chainId,
           tried: candidateUrls.length,
-          alchemyAttempted: Boolean(env.ALCHEMY_API_KEY && env.ALCHEMY_API_KEY.trim().length > 0),
+          alchemyAttempted: shouldTryAlchemyFallback,
         },
         { status: 502 },
       ),
@@ -406,12 +410,12 @@ async function handleRaceRpc({
     });
   }
 
-  const provider = providerFromUrl({ url: winner.url });
-  const response = new Response(winner.body, {
-    status: winner.status,
+  const provider = providerFromUrl({ url: raceResult.winner.url });
+  const response = new Response(raceResult.winner.body, {
+    status: raceResult.winner.status,
     headers: {
       "content-type": "application/json; charset=utf-8",
-      "x-rpc-upstream": winner.url,
+      "x-rpc-upstream": raceResult.winner.url,
       "x-rpc-provider": provider,
       "x-rpc-chain-id": String(chain.chainId),
       "x-rpc-chain-name": chain.name,
@@ -424,7 +428,7 @@ async function handleRaceRpc({
     startedAt,
     response,
     fallbackUsed: false,
-    jsonRpcError: isJsonRpcError({ value: safeJsonParse({ value: winner.body }) }),
+    jsonRpcError: isJsonRpcError({ value: safeJsonParse({ value: raceResult.winner.body }) }),
   });
 }
 
@@ -501,7 +505,10 @@ async function raceRequests({
   candidateUrls: string[];
   requestBody: string;
   timeoutMs: number;
-}): Promise<{ url: string; body: string; status: number } | null> {
+}): Promise<{
+  winner: { url: string; body: string; status: number } | null;
+  shouldTryAlchemyFallback: boolean;
+}> {
   const controllers: AbortController[] = [];
 
   const attempts = candidateUrls.map(async (url) => {
@@ -534,6 +541,7 @@ async function raceRequests({
         body,
         status: response.status,
         hasJsonRpcError: isJsonRpcError({ value: parsed }),
+        likelyStateIssueError: isLikelyStateIssueError({ value: parsed }),
       };
     } finally {
       clearTimeout(timeout);
@@ -553,6 +561,7 @@ async function raceRequests({
     const pending = new Set<number>(wrapped.map((_, index) => index));
     let jsonRpcResponsesObserved = 0;
     let jsonRpcErrorsObserved = 0;
+    let stateIssueErrorsObserved = 0;
 
     while (pending.size > 0) {
       const next = await Promise.race([...pending].map((index) => wrapped[index]));
@@ -564,23 +573,38 @@ async function raceRequests({
 
       if (!next.value.hasJsonRpcError) {
         abortAll({ controllers });
-        return { url: next.value.url, body: next.value.body, status: next.value.status };
+        return {
+          winner: { url: next.value.url, body: next.value.body, status: next.value.status },
+          shouldTryAlchemyFallback: false,
+        };
       }
 
       jsonRpcResponsesObserved += 1;
       jsonRpcErrorsObserved += 1;
+      if (next.value.likelyStateIssueError) {
+        stateIssueErrorsObserved += 1;
+      }
 
       if (jsonRpcResponsesObserved >= 5 && jsonRpcErrorsObserved >= 5) {
         abortAll({ controllers });
-        return null;
+        return {
+          winner: null,
+          shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
+        };
       }
     }
 
     abortAll({ controllers });
-    return null;
+    return {
+      winner: null,
+      shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
+    };
   } catch {
     abortAll({ controllers });
-    return null;
+    return {
+      winner: null,
+      shouldTryAlchemyFallback: false,
+    };
   }
 }
 
@@ -857,6 +881,35 @@ function isJsonRpcError({ value }: { value: unknown }): boolean {
 
   const candidate = value as { error?: unknown };
   return typeof candidate.error === "object" && candidate.error !== null;
+}
+
+function isLikelyStateIssueError({ value }: { value: unknown }): boolean {
+  if (!isJsonRpcError({ value })) {
+    return false;
+  }
+
+  const candidate = value as {
+    error?: {
+      message?: unknown;
+      data?: unknown;
+    };
+  };
+
+  const message =
+    typeof candidate.error?.message === "string" ? candidate.error.message.toLowerCase() : "";
+  const data = typeof candidate.error?.data === "string" ? candidate.error.data.toLowerCase() : "";
+  const combined = `${message} ${data}`;
+
+  return (
+    combined.includes("missing trie node") ||
+    combined.includes("historical state") ||
+    combined.includes("state is not available") ||
+    combined.includes("state unavailable") ||
+    combined.includes("header not found") ||
+    combined.includes("requested data is not available") ||
+    combined.includes("requested state is not available") ||
+    combined.includes("pruned")
+  );
 }
 
 function abortAll({ controllers }: { controllers: AbortController[] }): void {

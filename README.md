@@ -7,7 +7,7 @@ Production base URL: `https://rpc.steer.fun`
 `rpc.steer.fun` is a JSON-RPC proxy that races multiple public RPC providers and returns the first successful response.
 
 - Races 10 random HTTPS RPC endpoints per request
-- Falls back to Alchemy when race conditions are not satisfied
+- Falls back to Alchemy only when public RPC responses indicate likely state availability issues
 - Caches chain metadata from Chainlist and Alchemy network config
 
 ## Endpoints
@@ -99,7 +99,7 @@ curl -sS "https://rpc.steer.fun/v1/chains"
 - `400`: invalid chain selector, query params, or JSON body
 - `404`: unknown route or unknown chain
 - `405`: method not allowed for endpoint
-- `502`: no successful race result and fallback did not produce a result
+- `502`: no successful race result, or fallback conditions were not met, or fallback did not produce a result
 
 ## Contributing
 
