@@ -58,6 +58,12 @@ type RpcMetricsRecord = {
   latencyMs: number;
 };
 
+type JsonRpcErrorDetail = {
+  code?: number;
+  message: string;
+  data?: unknown;
+};
+
 const DAY_IN_SECONDS = 86_400;
 const RANDOM_RACE_FANOUT = 10;
 const DEFAULT_RPCS_URL = "https://chainlist.org/rpcs.json";
@@ -398,7 +404,8 @@ async function handleRaceRpc({
       startedAt,
       response: jsonResponse(
         {
-          error: "All RPC endpoints failed",
+          error: raceResult.failure?.message ?? "All RPC endpoints failed",
+          upstreamError: raceResult.failure?.upstreamError,
           chainId: chain.chainId,
           tried: candidateUrls.length,
           alchemyAttempted: shouldTryAlchemyFallback,
@@ -508,6 +515,10 @@ async function raceRequests({
 }): Promise<{
   winner: { url: string; body: string; status: number } | null;
   shouldTryAlchemyFallback: boolean;
+  failure?: {
+    message: string;
+    upstreamError?: JsonRpcErrorDetail;
+  };
 }> {
   const controllers: AbortController[] = [];
 
@@ -542,6 +553,7 @@ async function raceRequests({
         status: response.status,
         hasJsonRpcError: isJsonRpcError({ value: parsed }),
         likelyStateIssueError: isLikelyStateIssueError({ value: parsed }),
+        jsonRpcError: extractJsonRpcError({ value: parsed }),
       };
     } finally {
       clearTimeout(timeout);
@@ -562,12 +574,17 @@ async function raceRequests({
     let jsonRpcResponsesObserved = 0;
     let jsonRpcErrorsObserved = 0;
     let stateIssueErrorsObserved = 0;
+    let firstJsonRpcError: JsonRpcErrorDetail | null = null;
+    let firstTransportError: string | null = null;
 
     while (pending.size > 0) {
       const next = await Promise.race([...pending].map((index) => wrapped[index]));
       pending.delete(next.index);
 
       if (!next.ok) {
+        if (firstTransportError === null) {
+          firstTransportError = formatAttemptError({ error: next.error });
+        }
         continue;
       }
 
@@ -581,6 +598,9 @@ async function raceRequests({
 
       jsonRpcResponsesObserved += 1;
       jsonRpcErrorsObserved += 1;
+      if (firstJsonRpcError === null && next.value.jsonRpcError !== null) {
+        firstJsonRpcError = next.value.jsonRpcError;
+      }
       if (next.value.likelyStateIssueError) {
         stateIssueErrorsObserved += 1;
       }
@@ -590,6 +610,17 @@ async function raceRequests({
         return {
           winner: null,
           shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
+          failure:
+            firstJsonRpcError !== null
+              ? {
+                  message: firstJsonRpcError.message,
+                  upstreamError: firstJsonRpcError,
+                }
+              : firstTransportError !== null
+                ? {
+                    message: firstTransportError,
+                  }
+                : undefined,
         };
       }
     }
@@ -598,12 +629,26 @@ async function raceRequests({
     return {
       winner: null,
       shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
+      failure:
+        firstJsonRpcError !== null
+          ? {
+              message: firstJsonRpcError.message,
+              upstreamError: firstJsonRpcError,
+            }
+          : firstTransportError !== null
+            ? {
+                message: firstTransportError,
+              }
+            : undefined,
     };
   } catch {
     abortAll({ controllers });
     return {
       winner: null,
       shouldTryAlchemyFallback: false,
+      failure: {
+        message: "RPC race failed unexpectedly",
+      },
     };
   }
 }
@@ -881,6 +926,46 @@ function isJsonRpcError({ value }: { value: unknown }): boolean {
 
   const candidate = value as { error?: unknown };
   return typeof candidate.error === "object" && candidate.error !== null;
+}
+
+function extractJsonRpcError({ value }: { value: unknown }): JsonRpcErrorDetail | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const candidate = value as {
+    error?: {
+      code?: unknown;
+      message?: unknown;
+      data?: unknown;
+    };
+  };
+
+  if (typeof candidate.error?.message !== "string") {
+    return null;
+  }
+
+  const detail: JsonRpcErrorDetail = {
+    message: candidate.error.message,
+  };
+
+  if (typeof candidate.error.code === "number") {
+    detail.code = candidate.error.code;
+  }
+
+  if (candidate.error.data !== undefined) {
+    detail.data = candidate.error.data;
+  }
+
+  return detail;
+}
+
+function formatAttemptError({ error }: { error: unknown }): string {
+  if (error instanceof Error && error.message.length > 0) {
+    return error.message;
+  }
+
+  return "RPC request failed";
 }
 
 function isLikelyStateIssueError({ value }: { value: unknown }): boolean {

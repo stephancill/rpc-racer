@@ -1,10 +1,10 @@
 # RPC Racer API
 
-Production base URL: `https://rpc.steer.fun`
+Production base URL: `https://evm.stupidtech.net`
 
 ## Overview
 
-`rpc.steer.fun` is a JSON-RPC proxy that races multiple public RPC providers and returns the first successful response.
+`evm.stupidtech.net` is a JSON-RPC proxy that races multiple public RPC providers and returns the first successful response.
 
 - Races 10 random HTTPS RPC endpoints per request
 - Falls back to Alchemy only when public RPC responses indicate likely state availability issues
@@ -67,7 +67,7 @@ Example:
 Mainnet by chain ID:
 
 ```bash
-curl -sS "https://rpc.steer.fun/v1/1?timeoutMs=2000" \
+curl -sS "https://evm.stupidtech.net/v1/1?timeoutMs=2000" \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
@@ -75,7 +75,7 @@ curl -sS "https://rpc.steer.fun/v1/1?timeoutMs=2000" \
 Mainnet by alias:
 
 ```bash
-curl -sS "https://rpc.steer.fun/v1/ethereum?timeoutMs=2000" \
+curl -sS "https://evm.stupidtech.net/v1/ethereum?timeoutMs=2000" \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
@@ -83,7 +83,7 @@ curl -sS "https://rpc.steer.fun/v1/ethereum?timeoutMs=2000" \
 Testnet selection by alias:
 
 ```bash
-curl -sS "https://rpc.steer.fun/v1/ethereum?testnet=1" \
+curl -sS "https://evm.stupidtech.net/v1/ethereum?testnet=1" \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}'
 ```
@@ -91,7 +91,7 @@ curl -sS "https://rpc.steer.fun/v1/ethereum?testnet=1" \
 List chains:
 
 ```bash
-curl -sS "https://rpc.steer.fun/v1/chains"
+curl -sS "https://evm.stupidtech.net/v1/chains"
 ```
 
 ## Error Semantics
