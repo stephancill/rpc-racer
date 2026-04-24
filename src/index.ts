@@ -56,6 +56,7 @@ type RpcMetricsRecord = {
   jsonRpcErrorCount: number;
   fallbackCount: number;
   latencyMs: number;
+  latencySampleCount: number;
 };
 
 type JsonRpcErrorDetail = {
@@ -410,7 +411,12 @@ async function handleRaceRpc({
           tried: candidateUrls.length,
           alchemyAttempted: shouldTryAlchemyFallback,
         },
-        { status: 502 },
+        {
+          status: 502,
+          headers: {
+            "x-rpc-error-source": "upstream",
+          },
+        },
       ),
       fallbackUsed: false,
       jsonRpcError: false,
@@ -1069,12 +1075,15 @@ function finalizeRpcResponse({
   jsonRpcError: boolean;
 }): Response {
   const latencyMs = Math.max(0, performance.now() - startedAt);
+  const isInternalError = isInternalErrorResponse({ response });
+  const shouldTrackLatency = shouldTrackLatencyForSli({ response });
   const record: RpcMetricsRecord = {
     requestCount: 1,
-    errorCount: response.status >= 400 ? 1 : 0,
+    errorCount: isInternalError ? 1 : 0,
     jsonRpcErrorCount: jsonRpcError ? 1 : 0,
     fallbackCount: fallbackUsed ? 1 : 0,
     latencyMs,
+    latencySampleCount: shouldTrackLatency ? 1 : 0,
   };
 
   ctx.waitUntil(recordRpcMetrics({ env, record }));
@@ -1126,6 +1135,23 @@ function percentile({ values, quantile }: { values: number[]; quantile: number }
 
   const index = Math.min(values.length - 1, Math.floor((values.length - 1) * quantile));
   return values[index] ?? 0;
+}
+
+function isInternalErrorResponse({ response }: { response: Response }): boolean {
+  const errorSource = response.headers.get("x-rpc-error-source");
+  if (errorSource === "upstream") {
+    return false;
+  }
+
+  return response.status >= 500;
+}
+
+function shouldTrackLatencyForSli({ response }: { response: Response }): boolean {
+  if (response.headers.get("x-rpc-error-source") === "upstream") {
+    return false;
+  }
+
+  return response.status < 500;
 }
 
 function latencyBucket({
@@ -1200,16 +1226,19 @@ export class MetricsDurableObject {
       snapshot.errorResponses += Math.max(0, Math.trunc(record.errorCount));
       snapshot.jsonRpcErrors += Math.max(0, Math.trunc(record.jsonRpcErrorCount));
       snapshot.fallbackResponses += Math.max(0, Math.trunc(record.fallbackCount));
-      snapshot.latencyCount += Math.max(0, Math.trunc(record.requestCount));
-      snapshot.latencySumMs += Math.max(0, record.latencyMs);
-      snapshot.latencyMaxMs = Math.max(snapshot.latencyMaxMs, Math.max(0, record.latencyMs));
-      snapshot.latencyRecentMs.push(Math.max(0, record.latencyMs));
-      if (snapshot.latencyRecentMs.length > 2000) {
-        snapshot.latencyRecentMs.splice(0, snapshot.latencyRecentMs.length - 2000);
-      }
+      const latencySampleCount = Math.max(0, Math.trunc(record.latencySampleCount));
+      if (latencySampleCount > 0) {
+        snapshot.latencyCount += latencySampleCount;
+        snapshot.latencySumMs += Math.max(0, record.latencyMs);
+        snapshot.latencyMaxMs = Math.max(snapshot.latencyMaxMs, Math.max(0, record.latencyMs));
+        snapshot.latencyRecentMs.push(Math.max(0, record.latencyMs));
+        if (snapshot.latencyRecentMs.length > 2000) {
+          snapshot.latencyRecentMs.splice(0, snapshot.latencyRecentMs.length - 2000);
+        }
 
-      const bucket = latencyBucket({ latencyMs: Math.max(0, record.latencyMs) });
-      snapshot.latencyBuckets[bucket] = (snapshot.latencyBuckets[bucket] ?? 0) + 1;
+        const bucket = latencyBucket({ latencyMs: Math.max(0, record.latencyMs) });
+        snapshot.latencyBuckets[bucket] = (snapshot.latencyBuckets[bucket] ?? 0) + 1;
+      }
 
       await this.state.storage.put("snapshot", snapshot);
       return jsonResponse({ ok: true });
