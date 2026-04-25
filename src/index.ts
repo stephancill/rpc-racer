@@ -6,6 +6,7 @@ type Env = {
   DEFAULT_TIMEOUT_MS?: string;
   ALCHEMY_API_KEY?: string;
   METRICS_DO: DurableObjectNamespace;
+  ASSETS: Fetcher;
 };
 
 type RpcEntry = {
@@ -124,8 +125,8 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/") {
       const acceptHeader = request.headers.get("accept") ?? "";
-      const metrics = await getRpcMetricsSnapshot({ env });
       if (acceptHeader.includes("application/json")) {
+        const metrics = await getRpcMetricsSnapshot({ env });
         return jsonResponse({
           ok: true,
           routes: {
@@ -137,49 +138,6 @@ export default {
           metrics,
         });
       }
-
-      return htmlResponse({
-        html: `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>evm.stupidtech.net</title>
-  </head>
-  <body>
-    <h1>evm.stupidtech.net</h1>
-    <p>A fast and reliable public EVM RPC.</p>
-    <h2>Endpoints</h2>
-    <ul>
-      <li><code>POST /v1/:chainId</code></li>
-      <li><code>GET /v1/chains</code></li>
-      <li><code>GET /v1/chains/:chainId</code></li>
-      <li><code>GET /stats</code></li>
-    </ul>
-    <h2>Examples</h2>
-    <p>By chain ID:</p>
-    <pre><code>curl -sS "https://evm.stupidtech.net/v1/1" \\
-  -H 'content-type: application/json' \\
-  --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'</code></pre>
-    <p>By alias:</p>
-    <pre><code>curl -sS "https://evm.stupidtech.net/v1/ethereum" \\
-  -H 'content-type: application/json' \\
-  --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'</code></pre>
-    <h2>Stats</h2>
-    <ul>
-      <li><strong>Requests served:</strong> ${metrics.requestsServed.toLocaleString("en-US")}</li>
-      <li><strong>Average latency:</strong> ${metrics.averageLatencyMs.toFixed(2)}ms</li>
-    </ul>
-    <p>
-      <a href="https://github.com/stephancill/rpc-racer">github</a>
-      •
-      <a href="https://x.com/stephancill">twitter</a>
-      •
-      <a href="https://stupidtech.net">stupidtech.net</a>
-    </p>
-  </body>
-</html>`,
-      });
     }
 
     if (request.method === "GET" && url.pathname === "/v1/chains") {
@@ -205,6 +163,13 @@ export default {
         chainSelectorRaw: decodeURIComponent(raceMatch[1]),
         query: url.searchParams,
       });
+    }
+
+    if (request.method === "GET" || request.method === "HEAD") {
+      const assetResponse = await env.ASSETS.fetch(request);
+      if (assetResponse.status !== 404) {
+        return assetResponse;
+      }
     }
 
     return jsonResponse({ error: "Not found" }, { status: 404 });
@@ -1187,16 +1152,6 @@ function jsonResponse(body: unknown, init?: ResponseInit): Response {
     ...init,
     headers: {
       "content-type": "application/json; charset=utf-8",
-      ...init?.headers,
-    },
-  });
-}
-
-function htmlResponse({ html, init }: { html: string; init?: ResponseInit }): Response {
-  return new Response(html, {
-    ...init,
-    headers: {
-      "content-type": "text/html; charset=utf-8",
       ...init?.headers,
     },
   });

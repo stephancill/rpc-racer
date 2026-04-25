@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <title>evm.stupidtech.net</title>
+  </head>
+  <body>
+    <h1>evm.stupidtech.net</h1>
+    <p>A fast and reliable public EVM RPC.</p>
+
+    <h2>Endpoints</h2>
+    <ul>
+      <li><code>POST /v1/:chainId</code></li>
+      <li><code>GET /v1/chains</code></li>
+      <li><code>GET /v1/chains/:chainId</code></li>
+      <li><code>GET /stats</code></li>
+    </ul>
+
+    <h2>Examples</h2>
+    <p>By chain ID:</p>
+    <pre><code>curl -sS "https://evm.stupidtech.net/v1/1" \
+  -H 'content-type: application/json' \
+  --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'</code></pre>
+
+    <p>By alias:</p>
+    <pre><code>curl -sS "https://evm.stupidtech.net/v1/ethereum" \
+  -H 'content-type: application/json' \
+  --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'</code></pre>
+
+    <h2>Stats</h2>
+    <ul>
+      <li><strong>Requests served:</strong> <span id="requests-served">-</span></li>
+      <li><strong>Average latency:</strong> <span id="average-latency-ms">-</span></li>
+    </ul>
+
+    <p>
+      <a href="https://github.com/stephancill/rpc-racer">github</a>
+      -
+      <a href="https://x.com/stephancill">twitter</a>
+      -
+      <a href="https://stupidtech.net">stupidtech.net</a>
+    </p>
+
+    <script>
+      async function loadStats() {
+        try {
+          const response = await fetch("/stats", {
+            headers: {
+              accept: "application/json",
+            },
+          });
+
+          if (!response.ok) {
+            return;
+          }
+
+          const payload = await response.json();
+          const metrics = payload?.metrics;
+          if (typeof metrics?.requestsServed === "number") {
+            document.getElementById("requests-served").textContent =
+              metrics.requestsServed.toLocaleString("en-US");
+          }
+
+          if (typeof metrics?.averageLatencyMs === "number") {
+            document.getElementById("average-latency-ms").textContent =
+              `${metrics.averageLatencyMs.toFixed(2)}ms`;
+          }
+        } catch {
+          // Ignore stats refresh failures.
+        }
+      }
+
+      loadStats();
+    </script>
+  </body>
+</html>
