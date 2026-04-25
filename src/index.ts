@@ -67,7 +67,7 @@ type JsonRpcErrorDetail = {
 };
 
 const DAY_IN_SECONDS = 86_400;
-const RANDOM_RACE_FANOUT = 10;
+const RANDOM_RACE_FANOUT = 5;
 const DEFAULT_RPCS_URL = "https://chainlist.org/rpcs.json";
 const DEFAULT_ALCHEMY_NETWORK_CONFIG_URL =
   "https://app-api.alchemy.com/trpc/config.getNetworkConfig";

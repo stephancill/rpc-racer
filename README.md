@@ -6,7 +6,7 @@ Production base URL: `https://evm.stupidtech.net`
 
 `evm.stupidtech.net` is a JSON-RPC proxy that races multiple public RPC providers and returns the first successful response.
 
-- Races 10 random HTTPS RPC endpoints per request
+- Races 5 random HTTPS RPC endpoints per request
 - Falls back to Alchemy only when public RPC responses indicate likely state availability issues
 - Caches chain metadata from Chainlist and Alchemy network config
 
