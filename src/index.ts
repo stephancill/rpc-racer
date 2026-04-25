@@ -132,6 +132,7 @@ export default {
             race: "POST /v1/:chainId",
             chains: "GET /v1/chains",
             chain: "GET /v1/chains/:chainId",
+            stats: "GET /stats",
           },
           metrics,
         });
@@ -153,6 +154,7 @@ export default {
       <li><code>POST /v1/:chainId</code></li>
       <li><code>GET /v1/chains</code></li>
       <li><code>GET /v1/chains/:chainId</code></li>
+      <li><code>GET /stats</code></li>
     </ul>
     <h2>Examples</h2>
     <p>By chain ID:</p>
@@ -166,10 +168,7 @@ export default {
     <h2>Stats</h2>
     <ul>
       <li><strong>Requests served:</strong> ${metrics.requestsServed.toLocaleString("en-US")}</li>
-      <li><strong>Error rate:</strong> ${metrics.errorRatePct.toFixed(2)}%</li>
       <li><strong>Average latency:</strong> ${metrics.averageLatencyMs.toFixed(2)}ms</li>
-      <li><strong>P95 latency:</strong> ${metrics.p95LatencyMs.toFixed(2)}ms</li>
-      <li><strong>P99 latency:</strong> ${metrics.p99LatencyMs.toFixed(2)}ms</li>
     </ul>
     <p>
       <a href="https://github.com/stephancill/rpc-racer">github</a>
@@ -185,6 +184,11 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/v1/chains") {
       return handleListChains({ env, query: url.searchParams });
+    }
+
+    if (request.method === "GET" && url.pathname === "/stats") {
+      const metrics = await getRpcMetricsSnapshot({ env });
+      return jsonResponse({ ok: true, metrics });
     }
 
     const chainMatch = url.pathname.match(/^\/v1\/chains\/(\d+)$/);
