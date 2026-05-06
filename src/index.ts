@@ -387,7 +387,6 @@ async function handleRaceRpc({
       response: jsonResponse(
         {
           error: raceResult.failure?.message ?? "All RPC endpoints failed",
-          upstreamError: raceResult.failure?.upstreamError,
           chainId: chain.chainId,
           tried: candidateUrls.length,
           alchemyAttempted: shouldTryAlchemyFallback,
@@ -504,7 +503,6 @@ async function raceRequests({
   shouldTryAlchemyFallback: boolean;
   failure?: {
     message: string;
-    upstreamError?: JsonRpcErrorDetail;
   };
 }> {
   const controllers: AbortController[] = [];
@@ -596,12 +594,11 @@ async function raceRequests({
         abortAll({ controllers });
         return {
           winner: null,
-          shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
+          shouldTryAlchemyFallback: true,
           failure:
             firstJsonRpcError !== null
               ? {
-                  message: firstJsonRpcError.message,
-                  upstreamError: firstJsonRpcError,
+                  message: "All upstream RPCs returned errors",
                 }
               : firstTransportError !== null
                 ? {
@@ -615,12 +612,11 @@ async function raceRequests({
     abortAll({ controllers });
     return {
       winner: null,
-      shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
+      shouldTryAlchemyFallback: true,
       failure:
         firstJsonRpcError !== null
           ? {
-              message: firstJsonRpcError.message,
-              upstreamError: firstJsonRpcError,
+              message: "All upstream RPCs returned errors",
             }
           : firstTransportError !== null
             ? {
