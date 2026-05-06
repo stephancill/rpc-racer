@@ -123,6 +123,18 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "access-control-allow-origin": "*",
+          "access-control-allow-methods": "GET, POST, OPTIONS",
+          "access-control-allow-headers": "content-type, accept",
+          "access-control-max-age": "86400",
+        },
+      });
+    }
+
     if (request.method === "GET" && url.pathname === "/") {
       const acceptHeader = request.headers.get("accept") ?? "";
       if (acceptHeader.includes("application/json")) {
@@ -1056,7 +1068,14 @@ function finalizeRpcResponse({
   };
 
   ctx.waitUntil(recordRpcMetrics({ env, record }));
-  return response;
+
+  const corsHeaders = new Headers(response.headers);
+  corsHeaders.set("access-control-allow-origin", "*");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: corsHeaders,
+  });
 }
 
 async function recordRpcMetrics({
@@ -1152,6 +1171,7 @@ function jsonResponse(body: unknown, init?: ResponseInit): Response {
     ...init,
     headers: {
       "content-type": "application/json; charset=utf-8",
+      "access-control-allow-origin": "*",
       ...init?.headers,
     },
   });
