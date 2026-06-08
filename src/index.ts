@@ -32,6 +32,7 @@ type NormalizedChain = {
   isTestnet: boolean;
   aliases: string[];
   rpcUrls: string[];
+  wsRpcUrls: string[];
 };
 
 type ChainRegistry = {
@@ -160,6 +161,7 @@ export default {
           ok: true,
           routes: {
             race: "POST /v1/:chainId",
+            subscriptions: "WebSocket /v1/:chainId",
             chains: "GET /v1/chains",
             chain: "GET /v1/chains/:chainId",
             stats: "GET /stats",
@@ -185,6 +187,15 @@ export default {
 
     const raceMatch = url.pathname.match(/^\/v1\/([^/]+)$/);
     if (raceMatch !== null) {
+      if (isWebSocketUpgrade({ request })) {
+        return handleWebSocketRpc({
+          env,
+          request,
+          chainSelectorRaw: decodeURIComponent(raceMatch[1]),
+          query: url.searchParams,
+        });
+      }
+
       return handleRaceRpc({
         env,
         ctx,
@@ -250,6 +261,7 @@ async function handleListChains({
       isTestnet: chain.isTestnet,
       aliases: chain.aliases,
       rpcUrlCount: chain.rpcUrls.length,
+      wsRpcUrlCount: chain.wsRpcUrls.length,
     };
   });
 
@@ -340,6 +352,24 @@ async function handleRaceRpc({
 
   const defaultTimeoutMs = parsePositiveInt({ value: env.DEFAULT_TIMEOUT_MS, fallback: 2_500 });
   const rpcMethod = validatedBody.data.method;
+  if (rpcMethod === "eth_subscribe") {
+    return finalizeRpcResponse({
+      env,
+      ctx,
+      startedAt,
+      response: jsonResponse({
+        jsonrpc: "2.0",
+        id: validatedBody.data.id ?? null,
+        error: {
+          code: -32000,
+          message: "eth_subscribe requires a WebSocket connection",
+        },
+      }),
+      fallbackUsed: false,
+      chainId: chain.chainId,
+      method: rpcMethod,
+    });
+  }
 
   const timeoutMs = parsedQuery.data.timeoutMs ?? defaultTimeoutMs;
 
@@ -442,6 +472,175 @@ async function handleRaceRpc({
   });
 }
 
+async function handleWebSocketRpc({
+  env,
+  request,
+  chainSelectorRaw,
+  query,
+}: {
+  env: Env;
+  request: Request;
+  chainSelectorRaw: string;
+  query: URLSearchParams;
+}): Promise<Response> {
+  if (request.method !== "GET") {
+    return jsonResponse({ error: "Use GET to open a WebSocket connection" }, { status: 405 });
+  }
+
+  const registry = await getChainRegistry({ env });
+  const chain = resolveChainSelector({
+    selector: chainSelectorRaw,
+    preferTestnet: query.has("testnet"),
+    registry,
+  });
+  if (chain === undefined) {
+    return jsonResponse({ error: "Unknown chain" }, { status: 404 });
+  }
+
+  const candidateUrls = selectRandomRpcUrls({
+    rpcUrls: chain.wsRpcUrls,
+    count: RANDOM_RACE_FANOUT,
+  });
+  const alchemyUrl = await getAlchemyRpcUrl({ chainId: chain.chainId, env, protocol: "wss" });
+  if (alchemyUrl !== null) {
+    candidateUrls.push(alchemyUrl);
+  }
+
+  if (candidateUrls.length === 0) {
+    return jsonResponse({ error: "No usable WebSocket RPC URLs for chain" }, { status: 502 });
+  }
+
+  const pair = new WebSocketPair();
+  const client = pair[0];
+  const server = pair[1];
+  server.accept();
+
+  proxyWebSocketConnection({
+    clientSocket: server,
+    candidateUrls,
+  });
+
+  return new Response(null, {
+    status: 101,
+    webSocket: client,
+    headers: {
+      "x-rpc-chain-id": String(chain.chainId),
+      "x-rpc-chain-name": chain.name,
+    },
+  });
+}
+
+async function proxyWebSocketConnection({
+  clientSocket,
+  candidateUrls,
+}: {
+  clientSocket: WebSocket;
+  candidateUrls: string[];
+}): Promise<void> {
+  const queuedMessages: Array<string | ArrayBuffer> = [];
+  let upstreamSocket: WebSocket | null = null;
+  let upstreamReady = false;
+
+  clientSocket.addEventListener("message", (event) => {
+    const data = event.data;
+    if (typeof data !== "string" && !(data instanceof ArrayBuffer)) {
+      return;
+    }
+
+    if (upstreamReady && upstreamSocket !== null) {
+      upstreamSocket.send(data);
+      return;
+    }
+
+    queuedMessages.push(data);
+  });
+
+  clientSocket.addEventListener("close", (event) => {
+    upstreamSocket?.close(event.code, event.reason);
+  });
+
+  clientSocket.addEventListener("error", () => {
+    upstreamSocket?.close(1011, "Client WebSocket error");
+  });
+
+  try {
+    const connected = await connectFirstWebSocket({ urls: candidateUrls });
+    upstreamSocket = connected.socket;
+    upstreamReady = true;
+
+    upstreamSocket.addEventListener("message", (event) => {
+      const data = event.data;
+      if (typeof data === "string" || data instanceof ArrayBuffer) {
+        clientSocket.send(data);
+      }
+    });
+
+    upstreamSocket.addEventListener("close", (event) => {
+      clientSocket.close(event.code, event.reason);
+    });
+
+    upstreamSocket.addEventListener("error", () => {
+      clientSocket.close(1011, "Upstream WebSocket error");
+    });
+
+    for (const message of queuedMessages.splice(0)) {
+      upstreamSocket.send(message);
+    }
+  } catch {
+    clientSocket.close(1011, "No upstream WebSocket available");
+  }
+}
+
+async function connectFirstWebSocket({ urls }: { urls: string[] }): Promise<{ socket: WebSocket }> {
+  const attempts = urls.map((url) => connectWebSocket({ url }));
+  const pending = new Set<number>(attempts.map((_, index) => index));
+
+  while (pending.size > 0) {
+    const next = await Promise.race(
+      [...pending].map(async (index) => {
+        try {
+          const socket = await attempts[index];
+          return { index, socket };
+        } catch {
+          return { index, socket: null };
+        }
+      }),
+    );
+    pending.delete(next.index);
+
+    if (next.socket !== null) {
+      for (const index of pending) {
+        attempts[index]
+          .then((socket) => socket.close(1000, "Another upstream selected"))
+          .catch(() => {});
+      }
+      return { socket: next.socket };
+    }
+  }
+
+  throw new Error("No upstream WebSocket available");
+}
+
+function connectWebSocket({ url }: { url: string }): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(url);
+    const timeout = setTimeout(() => {
+      socket.close(1000, "Connection timeout");
+      reject(new Error("WebSocket connection timeout"));
+    }, 5_000);
+
+    socket.addEventListener("open", () => {
+      clearTimeout(timeout);
+      resolve(socket);
+    });
+
+    socket.addEventListener("error", () => {
+      clearTimeout(timeout);
+      reject(new Error("WebSocket connection failed"));
+    });
+  });
+}
+
 async function tryAlchemyFallback({
   chainId,
   requestBody,
@@ -453,24 +652,10 @@ async function tryAlchemyFallback({
   env: Env;
   timeoutMs: number;
 }): Promise<{ url: string; body: string; status: number } | null> {
-  const alchemyApiKey = env.ALCHEMY_API_KEY?.trim();
-  if (alchemyApiKey === undefined || alchemyApiKey.length === 0) {
+  const alchemyUrl = await getAlchemyRpcUrl({ chainId, env, protocol: "https" });
+  if (alchemyUrl === null) {
     return null;
   }
-
-  let slugByChainId: Map<number, string>;
-  try {
-    slugByChainId = await getAlchemyNetworkSlugMap({ env });
-  } catch {
-    return null;
-  }
-
-  const slug = slugByChainId.get(chainId);
-  if (slug === undefined) {
-    return null;
-  }
-
-  const alchemyUrl = `https://${slug}.g.alchemy.com/v2/${alchemyApiKey}`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort("Alchemy timeout"), timeoutMs);
@@ -505,6 +690,35 @@ async function tryAlchemyFallback({
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function getAlchemyRpcUrl({
+  chainId,
+  env,
+  protocol,
+}: {
+  chainId: number;
+  env: Env;
+  protocol: "https" | "wss";
+}): Promise<string | null> {
+  const alchemyApiKey = env.ALCHEMY_API_KEY?.trim();
+  if (alchemyApiKey === undefined || alchemyApiKey.length === 0) {
+    return null;
+  }
+
+  let slugByChainId: Map<number, string>;
+  try {
+    slugByChainId = await getAlchemyNetworkSlugMap({ env });
+  } catch {
+    return null;
+  }
+
+  const slug = slugByChainId.get(chainId);
+  if (slug === undefined) {
+    return null;
+  }
+
+  return `${protocol}://${slug}.g.alchemy.com/v2/${alchemyApiKey}`;
 }
 
 async function raceRequests({
@@ -704,7 +918,8 @@ async function getChainRegistry({ env }: { env: Env }): Promise<ChainRegistry> {
   const byChainId = new Map<number, NormalizedChain>();
   const orderedChains: NormalizedChain[] = [];
   for (const chain of validated.data as ChainEntry[]) {
-    const rpcUrls = normalizeRpcUrls({ rpcList: chain.rpc });
+    const rpcUrls = normalizeRpcUrls({ rpcList: chain.rpc, protocol: "https" });
+    const wsRpcUrls = normalizeRpcUrls({ rpcList: chain.rpc, protocol: "wss" });
     const normalized = {
       chainId: chain.chainId,
       name: chain.name,
@@ -713,6 +928,7 @@ async function getChainRegistry({ env }: { env: Env }): Promise<ChainRegistry> {
       isTestnet: Boolean(chain.isTestnet),
       aliases: buildChainAliases({ chain }),
       rpcUrls,
+      wsRpcUrls,
     };
 
     byChainId.set(chain.chainId, normalized);
@@ -852,14 +1068,20 @@ async function getAlchemyNetworkSlugMap({ env }: { env: Env }): Promise<Map<numb
   return slugByChainId;
 }
 
-function normalizeRpcUrls({ rpcList }: { rpcList: Array<RpcEntry | string> }): string[] {
+function normalizeRpcUrls({
+  rpcList,
+  protocol,
+}: {
+  rpcList: Array<RpcEntry | string>;
+  protocol: "https" | "wss";
+}): string[] {
   const urls = new Set<string>();
 
   for (const entry of rpcList) {
     const rawUrl = typeof entry === "string" ? entry : entry.url;
     const url = rawUrl.trim();
 
-    if (!url.startsWith("https://")) {
+    if (!url.startsWith(`${protocol}://`)) {
       continue;
     }
 
@@ -900,6 +1122,10 @@ function parsePositiveInt({
   }
 
   return parsed;
+}
+
+function isWebSocketUpgrade({ request }: { request: Request }): boolean {
+  return request.headers.get("upgrade")?.toLowerCase() === "websocket";
 }
 
 function safeJsonParse({ value }: { value: string }): unknown {
