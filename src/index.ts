@@ -108,6 +108,8 @@ const jsonRpcSchema = z
   })
   .passthrough();
 
+const DISALLOWED_RPC_METHOD_PREFIXES = ["alchemy_"];
+
 const chainsArraySchema = z.array(
   z
     .object({
@@ -340,6 +342,28 @@ async function handleRaceRpc({
 
   const defaultTimeoutMs = parsePositiveInt({ value: env.DEFAULT_TIMEOUT_MS, fallback: 2_500 });
   const rpcMethod = validatedBody.data.method;
+
+  if (isDisallowedRpcMethod({ method: rpcMethod })) {
+    return finalizeRpcResponse({
+      env,
+      ctx,
+      startedAt,
+      response: jsonResponse(
+        {
+          jsonrpc: "2.0",
+          error: {
+            code: -32601,
+            message: "Provider-specific methods are not supported",
+          },
+          id: validatedBody.data.id ?? null,
+        },
+        { status: 400 },
+      ),
+      fallbackUsed: false,
+      chainId: chain.chainId,
+      method: rpcMethod,
+    });
+  }
 
   const timeoutMs = parsedQuery.data.timeoutMs ?? defaultTimeoutMs;
 
@@ -881,6 +905,10 @@ function selectRandomRpcUrls({ rpcUrls, count }: { rpcUrls: string[]; count: num
   }
 
   return shuffled.slice(0, count);
+}
+
+function isDisallowedRpcMethod({ method }: { method: string }): boolean {
+  return DISALLOWED_RPC_METHOD_PREFIXES.some((prefix) => method.startsWith(prefix));
 }
 
 function parsePositiveInt({
