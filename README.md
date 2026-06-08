@@ -16,7 +16,7 @@ Production base URL: `https://evm.stupidtech.net`
   - Basic service metadata and route map.
 
 - `GET /stats`
-  - Returns service metrics as JSON.
+  - Returns service metrics as JSON, including average and median latency for the last 1000 requests per method per chain.
 
 - `POST /v1/:chain`
   - Proxies one JSON-RPC request.
