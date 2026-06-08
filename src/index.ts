@@ -55,14 +55,11 @@ export type ChainMethodLatencyStats = {
 
 type MetricsStorageSnapshot = {
   requestsServed: number;
-  errorResponses: number;
-  jsonRpcErrors: number;
   fallbackResponses: number;
   latencySumMs: number;
   latencyCount: number;
   latencyMaxMs: number;
   latencyBuckets: Record<string, number>;
-  latencyRecentMs: number[];
   chainMethodLatencySamples: ChainMethodLatencySamples;
 };
 
@@ -72,8 +69,6 @@ type RpcMetricsSnapshot = Omit<MetricsStorageSnapshot, "chainMethodLatencySample
 
 type RpcMetricsRecord = {
   requestCount: number;
-  errorCount: number;
-  jsonRpcErrorCount: number;
   fallbackCount: number;
   latencyMs: number;
   latencySampleCount: number;
@@ -286,7 +281,6 @@ async function handleRaceRpc({
       startedAt,
       response: jsonResponse({ error: "Use POST with a JSON-RPC body" }, { status: 405 }),
       fallbackUsed: false,
-      jsonRpcError: false,
     });
   }
 
@@ -300,7 +294,6 @@ async function handleRaceRpc({
       startedAt,
       response: jsonResponse({ error: "Invalid query params" }, { status: 400 }),
       fallbackUsed: false,
-      jsonRpcError: false,
     });
   }
 
@@ -314,7 +307,6 @@ async function handleRaceRpc({
       startedAt,
       response: jsonResponse({ error: "Request body must be valid JSON" }, { status: 400 }),
       fallbackUsed: false,
-      jsonRpcError: false,
     });
   }
 
@@ -326,7 +318,6 @@ async function handleRaceRpc({
       startedAt,
       response: jsonResponse({ error: "Body must be a JSON-RPC 2.0 request" }, { status: 400 }),
       fallbackUsed: false,
-      jsonRpcError: false,
     });
   }
 
@@ -344,7 +335,6 @@ async function handleRaceRpc({
       startedAt,
       response: jsonResponse({ error: "Unknown chain" }, { status: 404 }),
       fallbackUsed: false,
-      jsonRpcError: false,
     });
   }
 
@@ -361,7 +351,6 @@ async function handleRaceRpc({
       startedAt,
       response: jsonResponse({ error: "No usable HTTP RPC URLs for chain" }, { status: 502 }),
       fallbackUsed: false,
-      jsonRpcError: false,
       chainId: chain.chainId,
       method: rpcMethod,
     });
@@ -401,7 +390,6 @@ async function handleRaceRpc({
         startedAt,
         response,
         fallbackUsed: true,
-        jsonRpcError: isJsonRpcError({ value: safeJsonParse({ value: alchemy.body }) }),
         chainId: chain.chainId,
         method: rpcMethod,
       });
@@ -426,7 +414,6 @@ async function handleRaceRpc({
         },
       ),
       fallbackUsed: false,
-      jsonRpcError: false,
       chainId: chain.chainId,
       method: rpcMethod,
     });
@@ -450,7 +437,6 @@ async function handleRaceRpc({
     startedAt,
     response,
     fallbackUsed: false,
-    jsonRpcError: isJsonRpcError({ value: safeJsonParse({ value: raceResult.winner.body }) }),
     chainId: chain.chainId,
     method: rpcMethod,
   });
@@ -1028,9 +1014,6 @@ function providerFromUrl({ url }: { url: string }): string {
 async function getRpcMetricsSnapshot({ env }: { env: Env }): Promise<
   RpcMetricsSnapshot & {
     averageLatencyMs: number;
-    errorRatePct: number;
-    p95LatencyMs: number;
-    p99LatencyMs: number;
   }
 > {
   try {
@@ -1053,24 +1036,19 @@ function buildPublicMetricsSnapshot({
   snapshot: MetricsStorageSnapshot;
 }): RpcMetricsSnapshot & {
   averageLatencyMs: number;
-  errorRatePct: number;
-  p95LatencyMs: number;
-  p99LatencyMs: number;
 } {
-  const sorted = [...snapshot.latencyRecentMs].sort((left, right) => left - right);
-  const p95 = percentile({ values: sorted, quantile: 0.95 });
-  const p99 = percentile({ values: sorted, quantile: 0.99 });
-  const { chainMethodLatencySamples, ...publicSnapshot } = snapshot;
-
   return {
-    ...publicSnapshot,
-    chainMethodLatencies: buildChainMethodLatencyStats({ samples: chainMethodLatencySamples }),
+    requestsServed: snapshot.requestsServed,
+    fallbackResponses: snapshot.fallbackResponses,
+    latencySumMs: snapshot.latencySumMs,
+    latencyCount: snapshot.latencyCount,
+    latencyMaxMs: snapshot.latencyMaxMs,
+    latencyBuckets: snapshot.latencyBuckets,
+    chainMethodLatencies: buildChainMethodLatencyStats({
+      samples: snapshot.chainMethodLatencySamples,
+    }),
     averageLatencyMs:
       snapshot.latencyCount === 0 ? 0 : snapshot.latencySumMs / snapshot.latencyCount,
-    errorRatePct:
-      snapshot.requestsServed === 0 ? 0 : (snapshot.errorResponses / snapshot.requestsServed) * 100,
-    p95LatencyMs: p95,
-    p99LatencyMs: p99,
   };
 }
 
@@ -1080,7 +1058,6 @@ function finalizeRpcResponse({
   startedAt,
   response,
   fallbackUsed,
-  jsonRpcError,
   chainId,
   method,
 }: {
@@ -1089,17 +1066,13 @@ function finalizeRpcResponse({
   startedAt: number;
   response: Response;
   fallbackUsed: boolean;
-  jsonRpcError: boolean;
   chainId?: number;
   method?: string;
 }): Response {
   const latencyMs = Math.max(0, performance.now() - startedAt);
-  const isInternalError = isInternalErrorResponse({ response });
   const shouldTrackLatency = shouldTrackLatencyForSli({ response });
   const record: RpcMetricsRecord = {
     requestCount: 1,
-    errorCount: isInternalError ? 1 : 0,
-    jsonRpcErrorCount: jsonRpcError ? 1 : 0,
     fallbackCount: fallbackUsed ? 1 : 0,
     latencyMs,
     latencySampleCount: shouldTrackLatency ? 1 : 0,
@@ -1138,8 +1111,6 @@ async function recordRpcMetrics({
 function defaultMetricsSnapshot(): MetricsStorageSnapshot {
   return {
     requestsServed: 0,
-    errorResponses: 0,
-    jsonRpcErrors: 0,
     fallbackResponses: 0,
     latencySumMs: 0,
     latencyCount: 0,
@@ -1152,8 +1123,27 @@ function defaultMetricsSnapshot(): MetricsStorageSnapshot {
       "1000-2000": 0,
       "2000+": 0,
     },
-    latencyRecentMs: [],
     chainMethodLatencySamples: {},
+  };
+}
+
+function normalizeMetricsSnapshot({
+  snapshot,
+}: {
+  snapshot: Partial<MetricsStorageSnapshot>;
+}): MetricsStorageSnapshot {
+  const defaults = defaultMetricsSnapshot();
+  return {
+    requestsServed: Math.max(0, Math.trunc(snapshot.requestsServed ?? 0)),
+    fallbackResponses: Math.max(0, Math.trunc(snapshot.fallbackResponses ?? 0)),
+    latencySumMs: Math.max(0, snapshot.latencySumMs ?? 0),
+    latencyCount: Math.max(0, Math.trunc(snapshot.latencyCount ?? 0)),
+    latencyMaxMs: Math.max(0, snapshot.latencyMaxMs ?? 0),
+    latencyBuckets: {
+      ...defaults.latencyBuckets,
+      ...snapshot.latencyBuckets,
+    },
+    chainMethodLatencySamples: snapshot.chainMethodLatencySamples ?? {},
   };
 }
 
@@ -1225,24 +1215,6 @@ function median({ values }: { values: number[] }): number {
   return ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2;
 }
 
-function percentile({ values, quantile }: { values: number[]; quantile: number }): number {
-  if (values.length === 0) {
-    return 0;
-  }
-
-  const index = Math.min(values.length - 1, Math.floor((values.length - 1) * quantile));
-  return values[index] ?? 0;
-}
-
-function isInternalErrorResponse({ response }: { response: Response }): boolean {
-  const errorSource = response.headers.get("x-rpc-error-source");
-  if (errorSource === "upstream") {
-    return false;
-  }
-
-  return response.status >= 500;
-}
-
 function shouldTrackLatencyForSli({ response }: { response: Response }): boolean {
   if (response.headers.get("x-rpc-error-source") === "upstream") {
     return false;
@@ -1311,8 +1283,6 @@ export class MetricsDurableObject {
 
       const snapshot = await this.readSnapshot();
       snapshot.requestsServed += Math.max(0, Math.trunc(record.requestCount));
-      snapshot.errorResponses += Math.max(0, Math.trunc(record.errorCount));
-      snapshot.jsonRpcErrors += Math.max(0, Math.trunc(record.jsonRpcErrorCount));
       snapshot.fallbackResponses += Math.max(0, Math.trunc(record.fallbackCount));
       const latencySampleCount = Math.max(0, Math.trunc(record.latencySampleCount));
       if (latencySampleCount > 0) {
@@ -1320,10 +1290,6 @@ export class MetricsDurableObject {
         snapshot.latencyCount += latencySampleCount;
         snapshot.latencySumMs += latencyMs;
         snapshot.latencyMaxMs = Math.max(snapshot.latencyMaxMs, latencyMs);
-        snapshot.latencyRecentMs.push(latencyMs);
-        if (snapshot.latencyRecentMs.length > 2000) {
-          snapshot.latencyRecentMs.splice(0, snapshot.latencyRecentMs.length - 2000);
-        }
 
         if (record.chainId !== undefined && record.method !== undefined) {
           appendChainMethodLatencySample({
@@ -1348,13 +1314,7 @@ export class MetricsDurableObject {
   private async readSnapshot(): Promise<MetricsStorageSnapshot> {
     const snapshot = await this.state.storage.get<MetricsStorageSnapshot>("snapshot");
     if (snapshot !== undefined) {
-      if (!Array.isArray(snapshot.latencyRecentMs)) {
-        snapshot.latencyRecentMs = [];
-      }
-      if (snapshot.chainMethodLatencySamples === undefined) {
-        snapshot.chainMethodLatencySamples = {};
-      }
-      return snapshot;
+      return normalizeMetricsSnapshot({ snapshot });
     }
 
     const initial = defaultMetricsSnapshot();
