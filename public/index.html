@@ -35,6 +35,25 @@
       <li><strong>Average latency:</strong> <span id="average-latency-ms">-</span></li>
     </ul>
 
+    <h3>Latency by chain and method</h3>
+    <p>Average and median latency from the last 1000 requests for each method on each chain.</p>
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Chain ID</th>
+          <th scope="col">Method</th>
+          <th scope="col">Samples</th>
+          <th scope="col">Average</th>
+          <th scope="col">Median</th>
+        </tr>
+      </thead>
+      <tbody id="chain-method-latencies">
+        <tr>
+          <td colspan="5">No latency samples yet.</td>
+        </tr>
+      </tbody>
+    </table>
+
     <p>
       <a href="https://github.com/stephancill/rpc-racer">github</a>
       -
@@ -44,6 +63,57 @@
     </p>
 
     <script>
+      function formatLatency(value) {
+        return `${value.toFixed(2)}ms`;
+      }
+
+      function renderChainMethodLatencies(chainMethodLatencies) {
+        const tbody = document.getElementById("chain-method-latencies");
+        tbody.textContent = "";
+
+        const rows = [];
+        for (const chain of chainMethodLatencies ?? []) {
+          for (const method of chain.methods ?? []) {
+            rows.push({
+              chainId: chain.chainId,
+              method: method.method,
+              sampleCount: method.sampleCount,
+              averageLatencyMs: method.averageLatencyMs,
+              medianLatencyMs: method.medianLatencyMs,
+            });
+          }
+        }
+
+        if (rows.length === 0) {
+          const row = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.colSpan = 5;
+          cell.textContent = "No latency samples yet.";
+          row.append(cell);
+          tbody.append(row);
+          return;
+        }
+
+        for (const latency of rows) {
+          const row = document.createElement("tr");
+          const values = [
+            latency.chainId.toLocaleString("en-US"),
+            latency.method,
+            latency.sampleCount.toLocaleString("en-US"),
+            formatLatency(latency.averageLatencyMs),
+            formatLatency(latency.medianLatencyMs),
+          ];
+
+          for (const value of values) {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            row.append(cell);
+          }
+
+          tbody.append(row);
+        }
+      }
+
       async function loadStats() {
         try {
           const response = await fetch("/stats", {
@@ -64,9 +134,12 @@
           }
 
           if (typeof metrics?.averageLatencyMs === "number") {
-            document.getElementById("average-latency-ms").textContent =
-              `${metrics.averageLatencyMs.toFixed(2)}ms`;
+            document.getElementById("average-latency-ms").textContent = formatLatency(
+              metrics.averageLatencyMs,
+            );
           }
+
+          renderChainMethodLatencies(metrics?.chainMethodLatencies);
         } catch {
           // Ignore stats refresh failures.
         }
