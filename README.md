@@ -64,6 +64,7 @@ Example:
 - `x-rpc-chain-id`: resolved chain ID
 - `x-rpc-chain-name`: resolved chain name
 - `x-rpc-fallback`: present with value `alchemy` when fallback was used
+- `x-rpc-alchemy-attempted`: present on upstream error responses with whether Alchemy fallback was attempted
 
 ## Example Calls
 

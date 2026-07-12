@@ -428,11 +428,11 @@ async function handleRaceRpc({
           error: raceResult.failure?.message ?? "All RPC endpoints failed",
           chainId: chain.chainId,
           tried: candidateUrls.length,
-          alchemyAttempted: shouldTryAlchemyFallback,
         },
         {
           status: 502,
           headers: {
+            "x-rpc-alchemy-attempted": String(shouldTryAlchemyFallback),
             "x-rpc-error-source": "upstream",
           },
         },
