@@ -1224,6 +1224,7 @@ export function buildChainMethodLatencyStats({
       chainId: Number.parseInt(chainIdRaw, 10),
       methods: Object.entries(methods)
         .filter(([, latencySamples]) => latencySamples.length > 0)
+        .filter(([method]) => !isDisallowedRpcMethod({ method }))
         .map(([method, latencySamples]) => ({
           method,
           sampleCount: latencySamples.length,
