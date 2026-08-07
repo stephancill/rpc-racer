@@ -63,6 +63,8 @@ type MetricsStorageSnapshot = {
   chainMethodLatencySamples: ChainMethodLatencySamples;
 };
 
+type MetricsCounters = Omit<MetricsStorageSnapshot, "chainMethodLatencySamples">;
+
 type RpcMetricsSnapshot = Omit<MetricsStorageSnapshot, "chainMethodLatencySamples"> & {
   chainMethodLatencies: ChainMethodLatencyStats[];
 };
@@ -85,6 +87,8 @@ type JsonRpcErrorDetail = {
 const DAY_IN_SECONDS = 86_400;
 const RANDOM_RACE_FANOUT = 5;
 const MAX_CHAIN_METHOD_LATENCY_SAMPLES = 1000;
+const COUNTERS_STORAGE_KEY = "counters";
+const SAMPLES_KEY_PREFIX = "samples:";
 const DEFAULT_RPCS_URL = "https://chainlist.org/rpcs.json";
 const DEFAULT_ALCHEMY_NETWORK_CONFIG_URL =
   "https://app-api.alchemy.com/trpc/config.getNetworkConfig";
@@ -1155,55 +1159,59 @@ function defaultMetricsSnapshot(): MetricsStorageSnapshot {
   };
 }
 
-function normalizeMetricsSnapshot({
-  snapshot,
-}: {
-  snapshot: Partial<MetricsStorageSnapshot>;
-}): MetricsStorageSnapshot {
-  const defaults = defaultMetricsSnapshot();
+function defaultCounters(): MetricsCounters {
+  const {
+    requestsServed,
+    fallbackResponses,
+    latencySumMs,
+    latencyCount,
+    latencyMaxMs,
+    latencyBuckets,
+  } = defaultMetricsSnapshot();
   return {
-    requestsServed: Math.max(0, Math.trunc(snapshot.requestsServed ?? 0)),
-    fallbackResponses: Math.max(0, Math.trunc(snapshot.fallbackResponses ?? 0)),
-    latencySumMs: Math.max(0, snapshot.latencySumMs ?? 0),
-    latencyCount: Math.max(0, Math.trunc(snapshot.latencyCount ?? 0)),
-    latencyMaxMs: Math.max(0, snapshot.latencyMaxMs ?? 0),
-    latencyBuckets: {
-      ...defaults.latencyBuckets,
-      ...snapshot.latencyBuckets,
-    },
-    chainMethodLatencySamples: snapshot.chainMethodLatencySamples ?? {},
+    requestsServed,
+    fallbackResponses,
+    latencySumMs,
+    latencyCount,
+    latencyMaxMs,
+    latencyBuckets,
   };
 }
 
-export function appendChainMethodLatencySample({
-  samples,
-  chainId,
-  method,
-  latencyMs,
+function normalizeCounters({ counters }: { counters: Partial<MetricsCounters> }): MetricsCounters {
+  const defaults = defaultCounters();
+  return {
+    requestsServed: Math.max(0, Math.trunc(counters.requestsServed ?? 0)),
+    fallbackResponses: Math.max(0, Math.trunc(counters.fallbackResponses ?? 0)),
+    latencySumMs: Math.max(0, counters.latencySumMs ?? 0),
+    latencyCount: Math.max(0, Math.trunc(counters.latencyCount ?? 0)),
+    latencyMaxMs: Math.max(0, counters.latencyMaxMs ?? 0),
+    latencyBuckets: {
+      ...defaults.latencyBuckets,
+      ...counters.latencyBuckets,
+    },
+  };
+}
+
+function samplesStorageKey({ chainId, method }: { chainId: number; method: string }): string {
+  return `${SAMPLES_KEY_PREFIX}${chainId}:${method}`;
+}
+
+function parseSamplesStorageKey({
+  key,
 }: {
-  samples: ChainMethodLatencySamples;
-  chainId: number;
-  method: string;
-  latencyMs: number;
-}): void {
-  if (!Number.isFinite(chainId)) {
-    return;
+  key: string;
+}): { chainId: string; method: string } | null {
+  const raw = key.slice(SAMPLES_KEY_PREFIX.length);
+  const separatorIndex = raw.indexOf(":");
+  if (separatorIndex === -1) {
+    return null;
   }
 
-  const methodName = method.trim();
-  if (methodName.length === 0) {
-    return;
-  }
-
-  const chainKey = String(Math.trunc(chainId));
-  samples[chainKey] ??= {};
-  samples[chainKey][methodName] ??= [];
-
-  const methodSamples = samples[chainKey][methodName];
-  methodSamples.push(Math.max(0, latencyMs));
-  if (methodSamples.length > MAX_CHAIN_METHOD_LATENCY_SAMPLES) {
-    methodSamples.splice(0, methodSamples.length - MAX_CHAIN_METHOD_LATENCY_SAMPLES);
-  }
+  return {
+    chainId: raw.slice(0, separatorIndex),
+    method: raw.slice(separatorIndex + 1),
+  };
 }
 
 export function buildChainMethodLatencyStats({
@@ -1309,30 +1317,30 @@ export class MetricsDurableObject {
         return jsonResponse({ error: "Invalid metrics payload" }, { status: 400 });
       }
 
-      const snapshot = await this.readSnapshot();
-      snapshot.requestsServed += Math.max(0, Math.trunc(record.requestCount));
-      snapshot.fallbackResponses += Math.max(0, Math.trunc(record.fallbackCount));
+      const counters = await this.readCounters();
+      counters.requestsServed += Math.max(0, Math.trunc(record.requestCount));
+      counters.fallbackResponses += Math.max(0, Math.trunc(record.fallbackCount));
+
       const latencySampleCount = Math.max(0, Math.trunc(record.latencySampleCount));
       if (latencySampleCount > 0) {
         const latencyMs = Math.max(0, record.latencyMs);
-        snapshot.latencyCount += latencySampleCount;
-        snapshot.latencySumMs += latencyMs;
-        snapshot.latencyMaxMs = Math.max(snapshot.latencyMaxMs, latencyMs);
+        counters.latencyCount += latencySampleCount;
+        counters.latencySumMs += latencyMs;
+        counters.latencyMaxMs = Math.max(counters.latencyMaxMs, latencyMs);
+
+        const bucket = latencyBucket({ latencyMs });
+        counters.latencyBuckets[bucket] = (counters.latencyBuckets[bucket] ?? 0) + 1;
 
         if (record.chainId !== undefined && record.method !== undefined) {
-          appendChainMethodLatencySample({
-            samples: snapshot.chainMethodLatencySamples,
+          await this.appendLatencySample({
             chainId: record.chainId,
             method: record.method,
             latencyMs,
           });
         }
-
-        const bucket = latencyBucket({ latencyMs });
-        snapshot.latencyBuckets[bucket] = (snapshot.latencyBuckets[bucket] ?? 0) + 1;
       }
 
-      await this.state.storage.put("snapshot", snapshot);
+      await this.state.storage.put(COUNTERS_STORAGE_KEY, counters);
       return jsonResponse({ ok: true });
     }
 
@@ -1340,13 +1348,73 @@ export class MetricsDurableObject {
   }
 
   private async readSnapshot(): Promise<MetricsStorageSnapshot> {
-    const snapshot = await this.state.storage.get<MetricsStorageSnapshot>("snapshot");
-    if (snapshot !== undefined) {
-      return normalizeMetricsSnapshot({ snapshot });
+    await this.migrateLegacySnapshot();
+    const counters = await this.readCounters();
+    const chainMethodLatencySamples = await this.readChainMethodLatencySamples();
+    return { ...counters, chainMethodLatencySamples };
+  }
+
+  private async migrateLegacySnapshot(): Promise<void> {
+    const legacy = await this.state.storage.get<MetricsStorageSnapshot>("snapshot");
+    if (legacy === undefined) {
+      return;
     }
 
-    const initial = defaultMetricsSnapshot();
-    await this.state.storage.put("snapshot", initial);
+    await this.state.storage.put(COUNTERS_STORAGE_KEY, normalizeCounters({ counters: legacy }));
+
+    for (const [chainId, methods] of Object.entries(legacy.chainMethodLatencySamples ?? {})) {
+      for (const [method, samples] of Object.entries(methods)) {
+        await this.state.storage.put(
+          samplesStorageKey({ chainId: Number.parseInt(chainId, 10), method }),
+          samples,
+        );
+      }
+    }
+
+    await this.state.storage.delete("snapshot");
+  }
+
+  private async readCounters(): Promise<MetricsCounters> {
+    const stored = await this.state.storage.get<Partial<MetricsCounters>>(COUNTERS_STORAGE_KEY);
+    if (stored !== undefined) {
+      return normalizeCounters({ counters: stored });
+    }
+
+    const initial = defaultCounters();
+    await this.state.storage.put(COUNTERS_STORAGE_KEY, initial);
     return initial;
+  }
+
+  private async readChainMethodLatencySamples(): Promise<ChainMethodLatencySamples> {
+    const samples: ChainMethodLatencySamples = {};
+    const entries = await this.state.storage.list<number[]>({ prefix: SAMPLES_KEY_PREFIX });
+    for (const [key, values] of entries) {
+      const parsed = parseSamplesStorageKey({ key });
+      if (parsed === null) {
+        continue;
+      }
+      samples[parsed.chainId] ??= {};
+      samples[parsed.chainId][parsed.method] = values;
+    }
+    return samples;
+  }
+
+  private async appendLatencySample({
+    chainId,
+    method,
+    latencyMs,
+  }: {
+    chainId: number;
+    method: string;
+    latencyMs: number;
+  }): Promise<void> {
+    const key = samplesStorageKey({ chainId, method });
+    const existing = await this.state.storage.get<number[]>(key);
+    const samples = existing ?? [];
+    samples.push(Math.max(0, latencyMs));
+    if (samples.length > MAX_CHAIN_METHOD_LATENCY_SAMPLES) {
+      samples.splice(0, samples.length - MAX_CHAIN_METHOD_LATENCY_SAMPLES);
+    }
+    await this.state.storage.put(key, samples);
   }
 }
