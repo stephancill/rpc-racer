@@ -27,6 +27,10 @@ Production base URL: `https://evm.stupidtech.net`
     - `timeoutMs` (optional, integer `200`-`10000`, default `2000`)
     - `testnet` (optional, any present value enables testnet selection)
 
+- `WebSocket /v1/:chain`
+  - Proxies one WebSocket JSON-RPC connection for subscriptions such as `eth_subscribe`.
+  - Uses the same chain selection rules as `POST /v1/:chain`.
+
 - `GET /v1/chains`
   - Lists cached chain entries.
   - Query params:
@@ -96,6 +100,16 @@ List chains:
 
 ```bash
 curl -sS "https://evm.stupidtech.net/v1/chains"
+```
+
+Subscribe to new heads:
+
+```js
+const ws = new WebSocket("wss://evm.stupidtech.net/v1/ethereum");
+ws.addEventListener("open", () => {
+  ws.send(JSON.stringify({ jsonrpc: "2.0", method: "eth_subscribe", params: ["newHeads"], id: 1 }));
+});
+ws.addEventListener("message", (event) => console.log(event.data));
 ```
 
 ## Error Semantics
