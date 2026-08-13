@@ -72,6 +72,21 @@
       <p>* N &lt; 50</p>
     </details>
 
+    <details>
+      <summary>How it works</summary>
+      <p>
+        When you send a JSON-RPC request, we race 5 random public HTTPS RPC endpoints and return
+        the first successful response.
+      </p>
+      <p>
+        Chain metadata is cached from <a href="https://chainlist.org" target="_blank" rel="noopener">Chainlist</a>.
+      </p>
+      <p>
+        The winning provider is exposed via response headers:
+        <code>x-rpc-provider</code>, <code>x-rpc-upstream</code>, and <code>x-rpc-chain-id</code>.
+      </p>
+    </details>
+
     <p>
       <a href="https://github.com/stephancill/rpc-racer">github</a>
       -
