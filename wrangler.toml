@@ -21,7 +21,7 @@ name = "RPC_BURST_RATE_LIMITER"
 namespace_id = "928341001"
 
 [ratelimits.simple]
-limit = 20
+limit = 60
 period = 10
 
 [[ratelimits]]

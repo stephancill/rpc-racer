@@ -20,7 +20,7 @@ Production base URL: `https://evm.stupidtech.net`
 
 - `POST /v1/:chain`
   - Proxies one JSON-RPC request.
-  - Rate limited per source IP to 20 requests per 10 seconds and 60 requests per minute.
+  - Rate limited per source IP to 60 requests per 10 seconds and 60 requests per minute.
   - `:chain` can be:
     - numeric chain ID (for example `1`, `8453`, `42161`)
     - chain alias (for example `ethereum`, `base`, `arbitrum`, `tempo`)
