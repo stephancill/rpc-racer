@@ -16,6 +16,22 @@ routes = [
 name = "METRICS_DO"
 class_name = "MetricsDurableObject"
 
+[[ratelimits]]
+name = "RPC_BURST_RATE_LIMITER"
+namespace_id = "928341001"
+
+[ratelimits.simple]
+limit = 20
+period = 10
+
+[[ratelimits]]
+name = "RPC_SUSTAINED_RATE_LIMITER"
+namespace_id = "928341002"
+
+[ratelimits.simple]
+limit = 60
+period = 60
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["MetricsDurableObject"]

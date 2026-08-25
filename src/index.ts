@@ -7,6 +7,8 @@ type Env = {
   ALCHEMY_API_KEY?: string;
   METRICS_DO: DurableObjectNamespace;
   ASSETS: Fetcher;
+  RPC_BURST_RATE_LIMITER: RateLimit;
+  RPC_SUSTAINED_RATE_LIMITER: RateLimit;
 };
 
 type RpcEntry = {
@@ -288,6 +290,26 @@ async function handleRaceRpc({
       response: jsonResponse({ error: "Use POST with a JSON-RPC body" }, { status: 405 }),
       fallbackUsed: false,
     });
+  }
+
+  const rateLimitKey = request.headers.get("cf-connecting-ip") ?? "unknown";
+  const [burstLimit, sustainedLimit] = await Promise.all([
+    env.RPC_BURST_RATE_LIMITER.limit({ key: rateLimitKey }),
+    env.RPC_SUSTAINED_RATE_LIMITER.limit({ key: rateLimitKey }),
+  ]);
+  if (!burstLimit.success || !sustainedLimit.success) {
+    const retryAfterSeconds = sustainedLimit.success ? 10 : 60;
+    return jsonResponse(
+      {
+        error: "Rate limit exceeded. Contact hi@stupidtech.net if you need higher rate limits.",
+      },
+      {
+        status: 429,
+        headers: {
+          "retry-after": String(retryAfterSeconds),
+        },
+      },
+    );
   }
 
   const parsedQuery = querySchema.safeParse({
