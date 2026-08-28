@@ -67,6 +67,8 @@ Example:
 - `x-rpc-fallback`: present with value `alchemy` when fallback was used
 - `x-rpc-alchemy-attempted`: present on upstream error responses with whether Alchemy fallback was attempted
 
+When every public RPC returns an error, the first valid JSON-RPC error body and its HTTP status are returned unchanged. Alchemy is attempted first only for likely state-availability errors.
+
 ## Example Calls
 
 Mainnet by chain ID:
@@ -101,7 +103,7 @@ curl -sS "https://evm.stupidtech.net/v1/chains"
 
 ## Error Semantics
 
-- `400`: invalid chain selector, query params, or JSON body
+- `400`: invalid chain selector, query params, JSON body, or an upstream JSON-RPC error using HTTP 400
 - `404`: unknown route or unknown chain
 - `405`: method not allowed for endpoint
 - `429`: rate limit exceeded; includes a `Retry-After` header. Contact `hi@stupidtech.net` if you need higher rate limits.

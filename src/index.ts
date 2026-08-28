@@ -80,12 +80,6 @@ type RpcMetricsRecord = {
   method?: string;
 };
 
-type JsonRpcErrorDetail = {
-  code?: number;
-  message: string;
-  data?: unknown;
-};
-
 const DAY_IN_SECONDS = 86_400;
 const RANDOM_RACE_FANOUT = 5;
 const MAX_CHAIN_METHOD_LATENCY_SAMPLES = 1000;
@@ -445,6 +439,31 @@ async function handleRaceRpc({
       });
     }
 
+    if (raceResult.errorResponse !== null) {
+      const provider = providerFromUrl({ url: raceResult.errorResponse.url });
+      const response = new Response(raceResult.errorResponse.body, {
+        status: raceResult.errorResponse.status,
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "x-rpc-upstream": raceResult.errorResponse.url,
+          "x-rpc-provider": provider,
+          "x-rpc-chain-id": String(chain.chainId),
+          "x-rpc-chain-name": chain.name,
+          "x-rpc-alchemy-attempted": String(shouldTryAlchemyFallback),
+        },
+      });
+
+      return finalizeRpcResponse({
+        env,
+        ctx,
+        startedAt,
+        response,
+        fallbackUsed: false,
+        chainId: chain.chainId,
+        method: rpcMethod,
+      });
+    }
+
     return finalizeRpcResponse({
       env,
       ctx,
@@ -567,6 +586,7 @@ async function raceRequests({
   timeoutMs: number;
 }): Promise<{
   winner: { url: string; body: string; status: number } | null;
+  errorResponse: { url: string; body: string; status: number } | null;
   shouldTryAlchemyFallback: boolean;
   failure?: {
     message: string;
@@ -589,13 +609,12 @@ async function raceRequests({
         signal: controller.signal,
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
       const body = await response.text();
       const parsed = safeJsonParse({ value: body });
       if (!isJsonRpcResponse({ value: parsed })) {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
         throw new Error("Not a JSON-RPC response");
       }
 
@@ -605,7 +624,6 @@ async function raceRequests({
         status: response.status,
         hasJsonRpcError: isJsonRpcError({ value: parsed }),
         likelyStateIssueError: isLikelyStateIssueError({ value: parsed }),
-        jsonRpcError: extractJsonRpcError({ value: parsed }),
       };
     } finally {
       clearTimeout(timeout);
@@ -626,7 +644,7 @@ async function raceRequests({
     let jsonRpcResponsesObserved = 0;
     let jsonRpcErrorsObserved = 0;
     let stateIssueErrorsObserved = 0;
-    let firstJsonRpcError: JsonRpcErrorDetail | null = null;
+    let firstJsonRpcErrorResponse: { url: string; body: string; status: number } | null = null;
     let firstTransportError: string | null = null;
 
     while (pending.size > 0) {
@@ -644,14 +662,19 @@ async function raceRequests({
         abortAll({ controllers });
         return {
           winner: { url: next.value.url, body: next.value.body, status: next.value.status },
+          errorResponse: null,
           shouldTryAlchemyFallback: false,
         };
       }
 
       jsonRpcResponsesObserved += 1;
       jsonRpcErrorsObserved += 1;
-      if (firstJsonRpcError === null && next.value.jsonRpcError !== null) {
-        firstJsonRpcError = next.value.jsonRpcError;
+      if (firstJsonRpcErrorResponse === null) {
+        firstJsonRpcErrorResponse = {
+          url: next.value.url,
+          body: next.value.body,
+          status: next.value.status,
+        };
       }
       if (next.value.likelyStateIssueError) {
         stateIssueErrorsObserved += 1;
@@ -661,9 +684,10 @@ async function raceRequests({
         abortAll({ controllers });
         return {
           winner: null,
+          errorResponse: firstJsonRpcErrorResponse,
           shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
           failure:
-            firstJsonRpcError !== null
+            firstJsonRpcErrorResponse !== null
               ? {
                   message: "All upstream RPCs returned errors",
                 }
@@ -679,9 +703,10 @@ async function raceRequests({
     abortAll({ controllers });
     return {
       winner: null,
+      errorResponse: firstJsonRpcErrorResponse,
       shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
       failure:
-        firstJsonRpcError !== null
+        firstJsonRpcErrorResponse !== null
           ? {
               message: "All upstream RPCs returned errors",
             }
@@ -695,6 +720,7 @@ async function raceRequests({
     abortAll({ controllers });
     return {
       winner: null,
+      errorResponse: null,
       shouldTryAlchemyFallback: false,
       failure: {
         message: "RPC race failed unexpectedly",
@@ -980,38 +1006,6 @@ function isJsonRpcError({ value }: { value: unknown }): boolean {
 
   const candidate = value as { error?: unknown };
   return typeof candidate.error === "object" && candidate.error !== null;
-}
-
-function extractJsonRpcError({ value }: { value: unknown }): JsonRpcErrorDetail | null {
-  if (typeof value !== "object" || value === null) {
-    return null;
-  }
-
-  const candidate = value as {
-    error?: {
-      code?: unknown;
-      message?: unknown;
-      data?: unknown;
-    };
-  };
-
-  if (typeof candidate.error?.message !== "string") {
-    return null;
-  }
-
-  const detail: JsonRpcErrorDetail = {
-    message: candidate.error.message,
-  };
-
-  if (typeof candidate.error.code === "number") {
-    detail.code = candidate.error.code;
-  }
-
-  if (candidate.error.data !== undefined) {
-    detail.data = candidate.error.data;
-  }
-
-  return detail;
 }
 
 function formatAttemptError({ error }: { error: unknown }): string {
