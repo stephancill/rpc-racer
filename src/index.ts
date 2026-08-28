@@ -661,7 +661,7 @@ async function raceRequests({
         abortAll({ controllers });
         return {
           winner: null,
-          shouldTryAlchemyFallback: true,
+          shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
           failure:
             firstJsonRpcError !== null
               ? {
@@ -679,7 +679,7 @@ async function raceRequests({
     abortAll({ controllers });
     return {
       winner: null,
-      shouldTryAlchemyFallback: true,
+      shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
       failure:
         firstJsonRpcError !== null
           ? {
