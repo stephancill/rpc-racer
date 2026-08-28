@@ -78,13 +78,39 @@ type RpcMetricsRecord = {
   latencySampleCount: number;
   chainId?: number;
   method?: string;
+  urlResults?: RpcAttemptHealth[];
 };
+
+// Per-upstream outcome observed for a single request. `degraded` means the
+// endpoint looked unresponsive (transport failure, timeout, or an auth /
+// rate-limit provider error) rather than a genuine node-level RPC error.
+type RpcAttemptHealth = {
+  url: string;
+  degraded: boolean;
+};
+
+type RpcHealthEntry = {
+  consecutiveFailures: number;
+  blockedUntil: number;
+};
+
+type RpcHealthMap = Record<string, RpcHealthEntry>;
 
 const DAY_IN_SECONDS = 86_400;
 const RANDOM_RACE_FANOUT = 5;
 const MAX_CHAIN_METHOD_LATENCY_SAMPLES = 1000;
 const COUNTERS_STORAGE_KEY = "counters";
 const SAMPLES_KEY_PREFIX = "samples:";
+const RPC_HEALTH_STORAGE_KEY = "rpcHealth";
+// An upstream must fail (transport, timeout, auth, or rate-limit) this many
+// consecutive times before we stop preferring it.
+const RPC_HEALTH_FAIL_THRESHOLD = 2;
+// How long an endpoint is excluded from the preferred pool once flagged. While
+// it keeps failing inside the cooldown the window keeps sliding forward.
+const RPC_HEALTH_COOLDOWN_MS = 5 * 60_000;
+// How long a worker isolate caches the set of flagged endpoints before asking
+// the metrics DurableObject for a fresh snapshot.
+const RPC_HEALTH_SNAPSHOT_TTL_MS = 15_000;
 const DEFAULT_RPCS_URL = "https://chainlist.org/rpcs.json";
 const DEFAULT_ALCHEMY_NETWORK_CONFIG_URL =
   "https://app-api.alchemy.com/trpc/config.getNetworkConfig";
@@ -137,6 +163,7 @@ const alchemyNetworkConfigSchema = z.object({
 
 let chainMemoryCache: { expiresAt: number; registry: ChainRegistry } | null = null;
 let alchemyMemoryCache: { expiresAt: number; slugByChainId: Map<number, string> } | null = null;
+let rpcHealthMemoryCache: { expiresAt: number; blocked: Set<string> } | null = null;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -387,7 +414,12 @@ async function handleRaceRpc({
 
   const timeoutMs = parsedQuery.data.timeoutMs ?? defaultTimeoutMs;
 
-  const candidateUrls = selectRandomRpcUrls({ rpcUrls: chain.rpcUrls, count: RANDOM_RACE_FANOUT });
+  const blockedUrls = await getBlockedRpcUrls({ env });
+  const candidateUrls = selectRandomRpcUrls({
+    rpcUrls: chain.rpcUrls,
+    count: RANDOM_RACE_FANOUT,
+    blockedUrls,
+  });
   if (candidateUrls.length === 0) {
     return finalizeRpcResponse({
       env,
@@ -402,6 +434,7 @@ async function handleRaceRpc({
 
   const requestBody = JSON.stringify(validatedBody.data);
   const raceResult = await raceRequests({ candidateUrls, requestBody, timeoutMs });
+  const urlResults = raceResult.urlResults;
   if (raceResult.winner === null) {
     const hasAlchemyApiKey = Boolean(env.ALCHEMY_API_KEY && env.ALCHEMY_API_KEY.trim().length > 0);
     const shouldTryAlchemyFallback = raceResult.shouldTryAlchemyFallback && hasAlchemyApiKey;
@@ -436,6 +469,7 @@ async function handleRaceRpc({
         fallbackUsed: true,
         chainId: chain.chainId,
         method: rpcMethod,
+        urlResults,
       });
     }
 
@@ -461,6 +495,7 @@ async function handleRaceRpc({
         fallbackUsed: false,
         chainId: chain.chainId,
         method: rpcMethod,
+        urlResults,
       });
     }
 
@@ -485,6 +520,7 @@ async function handleRaceRpc({
       fallbackUsed: false,
       chainId: chain.chainId,
       method: rpcMethod,
+      urlResults,
     });
   }
 
@@ -508,6 +544,7 @@ async function handleRaceRpc({
     fallbackUsed: false,
     chainId: chain.chainId,
     method: rpcMethod,
+    urlResults,
   });
 }
 
@@ -588,6 +625,7 @@ async function raceRequests({
   winner: { url: string; body: string; status: number } | null;
   errorResponse: { url: string; body: string; status: number } | null;
   shouldTryAlchemyFallback: boolean;
+  urlResults: RpcAttemptHealth[];
   failure?: {
     message: string;
   };
@@ -618,12 +656,14 @@ async function raceRequests({
         throw new Error("Not a JSON-RPC response");
       }
 
+      const hasJsonRpcError = isJsonRpcError({ value: parsed });
       return {
         url,
         body,
         status: response.status,
-        hasJsonRpcError: isJsonRpcError({ value: parsed }),
+        hasJsonRpcError,
         likelyStateIssueError: isLikelyStateIssueError({ value: parsed }),
+        degraded: hasJsonRpcError && isDegradedRpcError({ value: parsed }),
       };
     } finally {
       clearTimeout(timeout);
@@ -641,6 +681,7 @@ async function raceRequests({
 
   try {
     const pending = new Set<number>(wrapped.map((_, index) => index));
+    const urlResults: RpcAttemptHealth[] = [];
     let jsonRpcResponsesObserved = 0;
     let jsonRpcErrorsObserved = 0;
     let stateIssueErrorsObserved = 0;
@@ -652,11 +693,14 @@ async function raceRequests({
       pending.delete(next.index);
 
       if (!next.ok) {
+        urlResults.push({ url: candidateUrls[next.index], degraded: true });
         if (firstTransportError === null) {
           firstTransportError = formatAttemptError({ error: next.error });
         }
         continue;
       }
+
+      urlResults.push({ url: next.value.url, degraded: next.value.degraded });
 
       if (!next.value.hasJsonRpcError) {
         abortAll({ controllers });
@@ -664,6 +708,7 @@ async function raceRequests({
           winner: { url: next.value.url, body: next.value.body, status: next.value.status },
           errorResponse: null,
           shouldTryAlchemyFallback: false,
+          urlResults,
         };
       }
 
@@ -686,6 +731,7 @@ async function raceRequests({
           winner: null,
           errorResponse: firstJsonRpcErrorResponse,
           shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
+          urlResults,
           failure:
             firstJsonRpcErrorResponse !== null
               ? {
@@ -705,6 +751,7 @@ async function raceRequests({
       winner: null,
       errorResponse: firstJsonRpcErrorResponse,
       shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
+      urlResults,
       failure:
         firstJsonRpcErrorResponse !== null
           ? {
@@ -722,6 +769,7 @@ async function raceRequests({
       winner: null,
       errorResponse: null,
       shouldTryAlchemyFallback: false,
+      urlResults: [],
       failure: {
         message: "RPC race failed unexpectedly",
       },
@@ -949,14 +997,72 @@ function normalizeRpcUrls({ rpcList }: { rpcList: Array<RpcEntry | string> }): s
   return [...urls];
 }
 
-function selectRandomRpcUrls({ rpcUrls, count }: { rpcUrls: string[]; count: number }): string[] {
-  const shuffled = [...rpcUrls];
+function selectRandomRpcUrls({
+  rpcUrls,
+  count,
+  blockedUrls,
+}: {
+  rpcUrls: string[];
+  count: number;
+  blockedUrls: Set<string>;
+}): string[] {
+  const healthy = rpcUrls.filter((url) => !blockedUrls.has(url));
+  const selected = shuffleRpcUrls({ urls: healthy }).slice(0, count);
+
+  if (selected.length < count) {
+    const blocked = rpcUrls.filter((url) => blockedUrls.has(url));
+    for (const url of shuffleRpcUrls({ urls: blocked })) {
+      if (selected.length >= count) {
+        break;
+      }
+      if (!selected.includes(url)) {
+        selected.push(url);
+      }
+    }
+  }
+
+  return selected;
+}
+
+function shuffleRpcUrls({ urls }: { urls: string[] }): string[] {
+  const shuffled = [...urls];
   for (let index = shuffled.length - 1; index > 0; index -= 1) {
     const randomIndex = Math.floor(Math.random() * (index + 1));
     [shuffled[index], shuffled[randomIndex]] = [shuffled[randomIndex], shuffled[index]];
   }
+  return shuffled;
+}
 
-  return shuffled.slice(0, count);
+// Returns the set of upstream RPC URLs currently in a failed-cooldown, using a
+// short-lived isolate cache so we don't hit the metrics DurableObject on every
+// request. Degrades gracefully to an empty set if metrics are unreachable.
+async function getBlockedRpcUrls({ env }: { env: Env }): Promise<Set<string>> {
+  const now = Date.now();
+  if (rpcHealthMemoryCache !== null && now < rpcHealthMemoryCache.expiresAt) {
+    return rpcHealthMemoryCache.blocked;
+  }
+
+  const blocked = new Set<string>();
+  try {
+    const stub = env.METRICS_DO.get(env.METRICS_DO.idFromName("global"));
+    const response = await stub.fetch("https://metrics.internal/rpc-health");
+    if (response.ok) {
+      const snapshot = (await response.json()) as { blocked: Record<string, number> };
+      for (const [url, blockedUntil] of Object.entries(snapshot.blocked)) {
+        if (blockedUntil > now) {
+          blocked.add(url);
+        }
+      }
+    }
+  } catch {
+    // Fall through with an empty blocked set; we'll retry on the next request.
+  }
+
+  rpcHealthMemoryCache = {
+    expiresAt: now + RPC_HEALTH_SNAPSHOT_TTL_MS,
+    blocked,
+  };
+  return blocked;
 }
 
 function isDisallowedRpcMethod({ method }: { method: string }): boolean {
@@ -1045,6 +1151,51 @@ function isLikelyStateIssueError({ value }: { value: unknown }): boolean {
   );
 }
 
+// True when a JSON-RPC error is a provider-level "this endpoint won't serve you"
+// signal (auth / API-key / rate-limit / paywall) rather than a genuine node-level
+// answer (like `execution reverted`). Only these count against an endpoint's
+// health; honest reverted errors do not.
+function isDegradedRpcError({ value }: { value: unknown }): boolean {
+  if (!isJsonRpcError({ value })) {
+    return false;
+  }
+
+  const candidate = value as {
+    error?: {
+      code?: unknown;
+      message?: unknown;
+      data?: unknown;
+    };
+  };
+
+  if (
+    typeof candidate.error?.code === "number" &&
+    (candidate.error.code === 403 || candidate.error.code === 429)
+  ) {
+    return true;
+  }
+
+  const message =
+    typeof candidate.error?.message === "string" ? candidate.error.message.toLowerCase() : "";
+  const data = typeof candidate.error?.data === "string" ? candidate.error.data.toLowerCase() : "";
+  const combined = `${message} ${data}`;
+
+  return (
+    /\bauth/.test(combined) ||
+    /api\s?key/.test(combined) ||
+    /\bauthentication/.test(combined) ||
+    /\bforbidden/.test(combined) ||
+    /not authorized/.test(combined) ||
+    /rate limit/.test(combined) ||
+    /too many requests/.test(combined) ||
+    /\bsubscription/.test(combined) ||
+    /payment/.test(combined) ||
+    /quota/.test(combined) ||
+    /needs?\s+an account/.test(combined) ||
+    /requires?\s+an account/.test(combined)
+  );
+}
+
 function abortAll({ controllers }: { controllers: AbortController[] }): void {
   for (const controller of controllers) {
     controller.abort("Winner selected");
@@ -1108,6 +1259,7 @@ function finalizeRpcResponse({
   fallbackUsed,
   chainId,
   method,
+  urlResults,
 }: {
   env: Env;
   ctx: ExecutionContext;
@@ -1116,6 +1268,7 @@ function finalizeRpcResponse({
   fallbackUsed: boolean;
   chainId?: number;
   method?: string;
+  urlResults?: RpcAttemptHealth[];
 }): Response {
   const latencyMs = Math.max(0, performance.now() - startedAt);
   const shouldTrackLatency = shouldTrackLatencyForSli({ response });
@@ -1126,6 +1279,7 @@ function finalizeRpcResponse({
     latencySampleCount: shouldTrackLatency ? 1 : 0,
     chainId,
     method,
+    urlResults,
   };
 
   ctx.waitUntil(recordRpcMetrics({ env, record }));
@@ -1326,12 +1480,28 @@ export class MetricsDurableObject {
       return jsonResponse(snapshot);
     }
 
+    if (request.method === "GET" && url.pathname === "/rpc-health") {
+      const health = await this.readRpcHealth();
+      const now = Date.now();
+      const blocked: Record<string, number> = {};
+      for (const [rpcUrl, entry] of Object.entries(health)) {
+        if (entry.blockedUntil > now) {
+          blocked[rpcUrl] = entry.blockedUntil;
+        }
+      }
+      return jsonResponse({ blocked });
+    }
+
     if (request.method === "POST" && url.pathname === "/record") {
       let record: RpcMetricsRecord;
       try {
         record = (await request.json()) as RpcMetricsRecord;
       } catch {
         return jsonResponse({ error: "Invalid metrics payload" }, { status: 400 });
+      }
+
+      if (record.urlResults !== undefined && record.urlResults.length > 0) {
+        await this.recordRpcHealth({ urlResults: record.urlResults });
       }
 
       const counters = await this.readCounters();
@@ -1400,6 +1570,52 @@ export class MetricsDurableObject {
     const initial = defaultCounters();
     await this.state.storage.put(COUNTERS_STORAGE_KEY, initial);
     return initial;
+  }
+
+  private async readRpcHealth(): Promise<RpcHealthMap> {
+    const stored = await this.state.storage.get<RpcHealthMap>(RPC_HEALTH_STORAGE_KEY);
+    return stored ?? {};
+  }
+
+  private async recordRpcHealth({ urlResults }: { urlResults: RpcAttemptHealth[] }): Promise<void> {
+    const health = await this.readRpcHealth();
+    const now = Date.now();
+    let changed = false;
+
+    for (const result of urlResults) {
+      let entry = health[result.url];
+      if (entry === undefined) {
+        entry = { consecutiveFailures: 0, blockedUntil: 0 };
+      }
+
+      if (result.degraded) {
+        entry.consecutiveFailures += 1;
+        if (entry.consecutiveFailures >= RPC_HEALTH_FAIL_THRESHOLD) {
+          // Re-slide the cooldown while the endpoint keeps failing so a
+          // permanently paywalled endpoint stays out.
+          entry.blockedUntil = now + RPC_HEALTH_COOLDOWN_MS;
+        }
+      } else {
+        // A healthy (even if honestly reverted) answer means the endpoint is
+        // serving requests again: recover it immediately.
+        entry.consecutiveFailures = 0;
+        entry.blockedUntil = 0;
+      }
+
+      health[result.url] = entry;
+      changed = true;
+    }
+
+    if (changed) {
+      // Opportunistically drop entries with no failures and an expired window to
+      // avoid unbounded growth.
+      for (const [rpcUrl, entry] of Object.entries(health)) {
+        if (entry.consecutiveFailures === 0 && entry.blockedUntil <= now) {
+          delete health[rpcUrl];
+        }
+      }
+      await this.state.storage.put(RPC_HEALTH_STORAGE_KEY, health);
+    }
   }
 
   private async readChainMethodLatencySamples(): Promise<ChainMethodLatencySamples> {
