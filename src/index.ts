@@ -5,6 +5,7 @@ type Env = {
   ALCHEMY_NETWORK_CONFIG_URL?: string;
   DEFAULT_TIMEOUT_MS?: string;
   ALCHEMY_API_KEY?: string;
+  INTERNAL_SECRET?: string;
   METRICS_DO: DurableObjectNamespace;
   ASSETS: Fetcher;
   RPC_BURST_RATE_LIMITER: RateLimit;
@@ -78,6 +79,7 @@ type RpcMetricsRecord = {
   latencySampleCount: number;
   chainId?: number;
   method?: string;
+  caller?: "public" | "internal";
   urlResults?: RpcAttemptHealth[];
 };
 
@@ -233,6 +235,23 @@ export default {
       return jsonResponse({ ok: true, metrics });
     }
 
+    const internalRaceMatch = url.pathname.match(/^\/internal\/v1\/([^/]+)$/);
+    if (internalRaceMatch !== null) {
+      const provided = request.headers.get("x-internal-secret");
+      const expected = env.INTERNAL_SECRET;
+      if (!expected || provided === null || provided !== expected) {
+        return jsonResponse({ error: "Unauthorized" }, { status: 401 });
+      }
+      return handleRaceRpc({
+        env,
+        ctx,
+        request,
+        chainSelectorRaw: decodeURIComponent(internalRaceMatch[1]),
+        query: url.searchParams,
+        caller: "internal",
+      });
+    }
+
     const chainMatch = url.pathname.match(/^\/v1\/chains\/(\d+)$/);
     if (chainMatch !== null) {
       return handleGetChain({ env, ctx, chainIdRaw: chainMatch[1] });
@@ -246,6 +265,7 @@ export default {
         request,
         chainSelectorRaw: decodeURIComponent(raceMatch[1]),
         query: url.searchParams,
+        caller: "public",
       });
     }
 
@@ -354,12 +374,14 @@ async function handleRaceRpc({
   request,
   chainSelectorRaw,
   query,
+  caller,
 }: {
   env: Env;
   ctx: ExecutionContext;
   request: Request;
   chainSelectorRaw: string;
   query: URLSearchParams;
+  caller: "public" | "internal";
 }): Promise<Response> {
   const startedAt = performance.now();
   if (request.method !== "POST") {
@@ -369,27 +391,37 @@ async function handleRaceRpc({
       startedAt,
       response: jsonResponse({ error: "Use POST with a JSON-RPC body" }, { status: 405 }),
       fallbackUsed: false,
+      caller,
     });
   }
 
-  const rateLimitKey = request.headers.get("cf-connecting-ip") ?? "unknown";
-  const [burstLimit, sustainedLimit] = await Promise.all([
-    env.RPC_BURST_RATE_LIMITER.limit({ key: rateLimitKey }),
-    env.RPC_SUSTAINED_RATE_LIMITER.limit({ key: rateLimitKey }),
-  ]);
-  if (!burstLimit.success || !sustainedLimit.success) {
-    const retryAfterSeconds = sustainedLimit.success ? 10 : 60;
-    return jsonResponse(
-      {
-        error: "Rate limit exceeded. Contact hi@stupidtech.net if you need higher rate limits.",
-      },
-      {
-        status: 429,
-        headers: {
-          "retry-after": String(retryAfterSeconds),
-        },
-      },
-    );
+  if (caller === "public") {
+    const rateLimitKey = request.headers.get("cf-connecting-ip") ?? "unknown";
+    const [burstLimit, sustainedLimit] = await Promise.all([
+      env.RPC_BURST_RATE_LIMITER.limit({ key: rateLimitKey }),
+      env.RPC_SUSTAINED_RATE_LIMITER.limit({ key: rateLimitKey }),
+    ]);
+    if (!burstLimit.success || !sustainedLimit.success) {
+      const retryAfterSeconds = sustainedLimit.success ? 10 : 60;
+      return finalizeRpcResponse({
+        env,
+        ctx,
+        startedAt,
+        response: jsonResponse(
+          {
+            error: "Rate limit exceeded. Contact hi@stupidtech.net if you need higher rate limits.",
+          },
+          {
+            status: 429,
+            headers: {
+              "retry-after": String(retryAfterSeconds),
+            },
+          },
+        ),
+        fallbackUsed: false,
+        caller,
+      });
+    }
   }
 
   const parsedQuery = querySchema.safeParse({
@@ -403,6 +435,7 @@ async function handleRaceRpc({
       startedAt,
       response: jsonResponse({ error: "Invalid query params" }, { status: 400 }),
       fallbackUsed: false,
+      caller,
     });
   }
 
@@ -416,6 +449,7 @@ async function handleRaceRpc({
       startedAt,
       response: jsonResponse({ error: "Request body must be valid JSON" }, { status: 400 }),
       fallbackUsed: false,
+      caller,
     });
   }
 
@@ -427,6 +461,7 @@ async function handleRaceRpc({
       startedAt,
       response: jsonResponse({ error: "Body must be a JSON-RPC 2.0 request" }, { status: 400 }),
       fallbackUsed: false,
+      caller,
     });
   }
 
@@ -444,6 +479,7 @@ async function handleRaceRpc({
       startedAt,
       response: jsonResponse({ error: "Unknown chain" }, { status: 404 }),
       fallbackUsed: false,
+      caller,
     });
   }
 
@@ -467,6 +503,7 @@ async function handleRaceRpc({
         { status: 400 },
       ),
       fallbackUsed: false,
+      caller,
       chainId: chain.chainId,
       method: rpcMethod,
     });
@@ -488,6 +525,7 @@ async function handleRaceRpc({
       startedAt,
       response: jsonResponse({ error: "No usable HTTP RPC URLs for chain" }, { status: 502 }),
       fallbackUsed: false,
+      caller,
       chainId: chain.chainId,
       method: rpcMethod,
     });
@@ -528,6 +566,7 @@ async function handleRaceRpc({
         startedAt,
         response,
         fallbackUsed: true,
+        caller,
         chainId: chain.chainId,
         method: rpcMethod,
         urlResults,
@@ -554,6 +593,7 @@ async function handleRaceRpc({
         startedAt,
         response,
         fallbackUsed: false,
+        caller,
         chainId: chain.chainId,
         method: rpcMethod,
         urlResults,
@@ -579,6 +619,7 @@ async function handleRaceRpc({
         },
       ),
       fallbackUsed: false,
+      caller,
       chainId: chain.chainId,
       method: rpcMethod,
       urlResults,
@@ -603,6 +644,7 @@ async function handleRaceRpc({
     startedAt,
     response,
     fallbackUsed: false,
+    caller,
     chainId: chain.chainId,
     method: rpcMethod,
     urlResults,
@@ -1619,6 +1661,7 @@ function finalizeRpcResponse({
   chainId,
   method,
   urlResults,
+  caller = "public",
 }: {
   env: Env;
   ctx: ExecutionContext;
@@ -1628,6 +1671,7 @@ function finalizeRpcResponse({
   chainId?: number;
   method?: string;
   urlResults?: RpcAttemptHealth[];
+  caller?: "public" | "internal";
 }): Response {
   const latencyMs = Math.max(0, performance.now() - startedAt);
   const shouldTrackLatency = shouldTrackLatencyForSli({ response });
@@ -1638,6 +1682,7 @@ function finalizeRpcResponse({
     latencySampleCount: shouldTrackLatency ? 1 : 0,
     chainId,
     method,
+    caller,
     urlResults,
   };
 

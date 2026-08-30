@@ -31,6 +31,14 @@ Production base URL: `https://evm.stupidtech.net`
       amplification for sustained scanner/monitor traffic.
     - `testnet` (optional, any present value enables testnet selection)
 
+- `POST /internal/v1/:chain`
+  - Same JSON-RPC proxy as `/v1/:chain`, but **exempt from the public
+    per-IP rate limit** for service-bound callers.
+  - Requires a matching `x-internal-secret` request header equal to the
+    `INTERNAL_SECRET` secret (otherwise `401`).
+  - Requests are recorded in metrics with `caller: "internal"` so scanner load
+    can be observed separately from public traffic.
+
 - `GET /v1/chains`
   - Lists cached chain entries.
   - Query params:
