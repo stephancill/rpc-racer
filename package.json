@@ -10,6 +10,8 @@
     "lint": "bunx oxlint src",
     "format": "bunx oxfmt --write .",
     "check": "bun run lint && bun run format",
+    "block-speed": "bun scripts/block-speed.mjs",
+    "fill-block-speeds": "bun scripts/fill-block-speeds.mjs",
     "benchmark": "bun scripts/benchmark.mjs"
   },
   "dependencies": {

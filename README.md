@@ -32,9 +32,19 @@ Production base URL: `https://evm.stupidtech.net`
   - Lists cached chain entries.
   - Query params:
     - `includeRpcUrls` (optional, any present value includes full `rpcUrls` arrays)
+  - Each entry may include `blockSpeedMs`, the estimated average time between blocks in milliseconds. Values are computed lazily (only for chains that don't yet have one) during refreshes, so the field appears once a chain has been sampled.
 
 - `GET /v1/chains/:chainId`
-  - Returns one chain entry by numeric chain ID.
+  - Returns one chain entry by numeric chain ID. Includes `blockSpeedMs` when available.
+
+## Block Speed
+
+`blockSpeedMs` is an estimated average block interval for a chain, measured by probing the chain's own RPCs: `eth_blockNumber` followed by a few historical `eth_getBlockByNumber` reads, then dividing the timestamp span by the block count.
+
+- Computed only for chains that do not yet have a stored value.
+- Persisted in the `MetricsDurableObject` (survives across requests/refreshes).
+- Sampling runs in the background (`ctx.waitUntil`) during `/v1/chains` refreshes, with a small number of chains estimated per pass, so the full set fills in over time.
+- Reported in **milliseconds**.
 
 ## Chain Selection
 
