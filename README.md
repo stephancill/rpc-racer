@@ -139,11 +139,11 @@ curl -sS "https://evm.stupidtech.net/v1/chains"
 2. Run local dev server: `bun run dev`
 3. Run checks before pushing: `bun run check`
 4. Optional benchmark: `bun run benchmark`
-6. Consistency integration test (Milestone 0): set `INTERNAL_SECRET` and run
+5. Consistency integration test (Milestone 0): set `INTERNAL_SECRET` and run
    `bun run integration -- --fan-out 1 [--burst 5]` — verifies `eth_getLogs` by
    exact block hash is consistent and receipt hashes match across Ethereum,
    Base, Optimism, and Arbitrum.
-7. Open a PR to `main`
+6. Open a PR to `main`
 
 Notes:
 

@@ -60,10 +60,13 @@ async function rpc(chainId, method, params, { fanout = FANOUT } = {}) {
         await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
         continue;
       }
-      throw Object.assign(new Error(`${method} chain ${chainId} [${res.status}]: ${msg}`), { code: json.error?.code });
+      throw Object.assign(new Error(`${method} chain ${chainId} [${res.status}]: ${msg}`), {
+        code: json.error?.code,
+      });
     } catch (e) {
       lastErr = e;
-      if (e.code !== undefined || !/rate limit|too many|429|503|502|530/i.test(String(e.message))) throw e;
+      if (e.code !== undefined || !/rate limit|too many|429|503|502|530/i.test(String(e.message)))
+        throw e;
       await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
     }
   }
@@ -82,10 +85,16 @@ async function runChain(target) {
   let logsUnsupported = false;
   try {
     logs = await rpc(target.id, "eth_getLogs", [{ blockHash, topics: [TRANSFER_TOPIC] }]);
-    badHashes = (logs ?? []).filter((l) => l.blockHash?.toLowerCase() !== blockHash.toLowerCase()).length;
+    badHashes = (logs ?? []).filter(
+      (l) => l.blockHash?.toLowerCase() !== blockHash.toLowerCase(),
+    ).length;
   } catch (e) {
     const msg = String(e.message);
-    if (/method not available|not supported|unsupported|requires? an api key|needs an account|auth error/i.test(msg)) {
+    if (
+      /method not available|not supported|unsupported|requires? an api key|needs an account|auth error/i.test(
+        msg,
+      )
+    ) {
       logsUnsupported = true; // upstream doesn't serve this method / needs auth
     } else {
       throw e;
@@ -96,7 +105,9 @@ async function runChain(target) {
   let receiptUnavailable = false;
   if (txCount > 0) {
     try {
-      const receipt = await rpc(target.id, "eth_getTransactionReceipt", [block.transactions[0].hash]);
+      const receipt = await rpc(target.id, "eth_getTransactionReceipt", [
+        block.transactions[0].hash,
+      ]);
       receiptOk = receipt !== null && receipt.blockHash?.toLowerCase() === blockHash.toLowerCase();
     } catch (e2) {
       const msg = String(e2.message);
@@ -129,11 +140,18 @@ async function main() {
       const r = await runChain(target);
       results.push(r);
       const logStats = r.logsUnsupported ? "skip(upstream)" : `logs=${r.logsCount}`;
-      console.log(`[ok]   ${r.label.padEnd(9)} height=${r.height} txs=${r.txCount} ${logStats} hashMismatch=${r.badHashes} receiptOk=${r.receiptOk}`);
+      console.log(
+        `[ok]   ${r.label.padEnd(9)} height=${r.height} txs=${r.txCount} ${logStats} hashMismatch=${r.badHashes} receiptOk=${r.receiptOk}`,
+      );
     } catch (e) {
       const msg = String(e.message);
       if (/quota|rate limit|limit|plan|upgrade|too many|502|530|usage/i.test(msg)) {
-        results.push({ label: target.label, chainId: target.id, skipLimit: true, note: msg.slice(0, 80) });
+        results.push({
+          label: target.label,
+          chainId: target.id,
+          skipLimit: true,
+          note: msg.slice(0, 80),
+        });
         console.warn(`[skip] ${target.label}: upstream limit (${msg.slice(0, 60)})`);
       } else {
         results.push({ label: target.label, chainId: target.id, error: String(e) });
@@ -162,12 +180,19 @@ async function main() {
     }
   }
 
-  const failed = results.filter((r) => (r.error && !r.skipLimit) || r.badHashes > 0 || (r.txCount > 0 && !r.receiptOk && !r.receiptUnavailable));
+  const failed = results.filter(
+    (r) =>
+      (r.error && !r.skipLimit) ||
+      r.badHashes > 0 ||
+      (r.txCount > 0 && !r.receiptOk && !r.receiptUnavailable),
+  );
   const yes = failed.length === 0;
   const summary = { results, amp, burstOk, burstNeed: BURST, pass: yes };
   if (JSON_OUT) await Bun.write(JSON_OUT, JSON.stringify(summary, null, 2));
 
-  console.log(`\nfailed=${failed.length} amp=${JSON.stringify(amp)} burst=${burstOk}/${BURST} -> ${yes ? "PASS" : "FAIL"}`);
+  console.log(
+    `\nfailed=${failed.length} amp=${JSON.stringify(amp)} burst=${burstOk}/${BURST} -> ${yes ? "PASS" : "FAIL"}`,
+  );
   process.exit(yes ? 0 : 1);
 }
 

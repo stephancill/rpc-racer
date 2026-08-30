@@ -788,6 +788,7 @@ async function raceRequests({
     let jsonRpcResponsesObserved = 0;
     let jsonRpcErrorsObserved = 0;
     let stateIssueErrorsObserved = 0;
+    let degradedErrorsObserved = 0;
     let firstJsonRpcErrorResponse: { url: string; body: string; status: number } | null = null;
     let firstTransportError: string | null = null;
 
@@ -818,6 +819,9 @@ async function raceRequests({
       }
       if (next.value.likelyStateIssueError) {
         stateIssueErrorsObserved += 1;
+      }
+      if (next.value.degraded) {
+        degradedErrorsObserved += 1;
       }
 
       if (jsonRpcResponsesObserved >= 5 && jsonRpcErrorsObserved >= 5) {
@@ -857,7 +861,7 @@ async function raceRequests({
     return {
       winner,
       errorResponse: firstJsonRpcErrorResponse,
-      shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
+      shouldTryAlchemyFallback: stateIssueErrorsObserved > 0 || degradedErrorsObserved > 0,
       urlResults,
       ...(failure !== undefined && { failure }),
     };

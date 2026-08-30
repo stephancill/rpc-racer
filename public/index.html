@@ -45,7 +45,9 @@
       minute. If you need higher rate limits, contact
       <a href="mailto:hi@stupidtech.net">hi@stupidtech.net</a>. If you expect sustained request
       volume, consider deploying your own instance from the
-      <a href="https://github.com/stephancill/rpc-racer" target="_blank" rel="noopener">GitHub repository</a>.
+      <a href="https://github.com/stephancill/rpc-racer" target="_blank" rel="noopener"
+        >GitHub repository</a
+      >.
     </p>
 
     <h2>Stats</h2>
@@ -78,11 +80,12 @@
     <details>
       <summary>How it works</summary>
       <p>
-        When you send a JSON-RPC request, we race 5 random public HTTPS RPC endpoints and return
-        the first successful response.
+        When you send a JSON-RPC request, we race 5 random public HTTPS RPC endpoints and return the
+        first successful response.
       </p>
       <p>
-        Chain metadata is cached from <a href="https://chainlist.org" target="_blank" rel="noopener">Chainlist</a>.
+        Chain metadata is cached from
+        <a href="https://chainlist.org" target="_blank" rel="noopener">Chainlist</a>.
       </p>
       <p>
         The winning provider is exposed via response headers:
