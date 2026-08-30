@@ -784,7 +784,7 @@ async function raceRequests({
 
   try {
     const pending = new Set<number>(wrapped.map((_, index) => index));
-    const urlResults: RpcAttemptHealth[] = [];
+    let winner: { url: string; body: string; status: number } | null = null;
     let jsonRpcResponsesObserved = 0;
     let jsonRpcErrorsObserved = 0;
     let stateIssueErrorsObserved = 0;
@@ -796,23 +796,15 @@ async function raceRequests({
       pending.delete(next.index);
 
       if (!next.ok) {
-        urlResults.push({ url: candidateUrls[next.index], degraded: true });
-        if (firstTransportError === null) {
+        if (firstTransportError === null && !isWinnerAbort({ error: next.error })) {
           firstTransportError = formatAttemptError({ error: next.error });
         }
         continue;
       }
 
-      urlResults.push({ url: next.value.url, degraded: next.value.degraded });
-
       if (!next.value.hasJsonRpcError) {
-        abortAll({ controllers });
-        return {
-          winner: { url: next.value.url, body: next.value.body, status: next.value.status },
-          errorResponse: null,
-          shouldTryAlchemyFallback: false,
-          urlResults,
-        };
+        winner = { url: next.value.url, body: next.value.body, status: next.value.status };
+        break;
       }
 
       jsonRpcResponsesObserved += 1;
@@ -829,45 +821,49 @@ async function raceRequests({
       }
 
       if (jsonRpcResponsesObserved >= 5 && jsonRpcErrorsObserved >= 5) {
-        abortAll({ controllers });
-        return {
-          winner: null,
-          errorResponse: firstJsonRpcErrorResponse,
-          shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
-          urlResults,
-          failure:
-            firstJsonRpcErrorResponse !== null
-              ? {
-                  message: "All upstream RPCs returned errors",
-                }
-              : firstTransportError !== null
-                ? {
-                    message: firstTransportError,
-                  }
-                : undefined,
-        };
+        break;
       }
     }
 
     abortAll({ controllers });
+
+    // Let every in-flight/won attempt settle so we capture the real verdicts,
+    // including rate-limited responses that finished just after the winner was
+    // chosen (all winner-aborted fetches reject immediately, so this is cheap).
+    await Promise.allSettled(wrapped);
+
+    // Build the full health snapshot from actual outcomes. "Winner aborted"
+    // attempts never produced an answer (they just lost the race), so they carry
+    // no health signal either way and are excluded from the tally.
+    const urlResults: RpcAttemptHealth[] = [];
+    for (const outcome of wrapped) {
+      const settled = await outcome;
+      if (settled.ok) {
+        urlResults.push({ url: settled.value.url, degraded: settled.value.degraded });
+      } else if (!isWinnerAbort({ error: settled.error })) {
+        urlResults.push({ url: candidateUrls[settled.index], degraded: true });
+      }
+    }
+
+    let failure: { message: string } | undefined;
+    if (winner === null) {
+      if (firstJsonRpcErrorResponse !== null) {
+        failure = { message: "All upstream RPCs returned errors" };
+      } else if (firstTransportError !== null) {
+        failure = { message: firstTransportError };
+      }
+    }
+
     return {
-      winner: null,
+      winner,
       errorResponse: firstJsonRpcErrorResponse,
       shouldTryAlchemyFallback: stateIssueErrorsObserved > 0,
       urlResults,
-      failure:
-        firstJsonRpcErrorResponse !== null
-          ? {
-              message: "All upstream RPCs returned errors",
-            }
-          : firstTransportError !== null
-            ? {
-                message: firstTransportError,
-              }
-            : undefined,
+      ...(failure !== undefined && { failure }),
     };
-  } catch {
+  } catch (error) {
     abortAll({ controllers });
+    void error;
     return {
       winner: null,
       errorResponse: null,
@@ -878,6 +874,29 @@ async function raceRequests({
       },
     };
   }
+}
+
+// True when an attempt was cancelled because another provider won the race
+// ("Winner selected" abort), so this endpoint never produced a response and
+// should not be counted against its health. Real transport failures, timeouts,
+// and explicit provider errors are separate and DO count.
+function isWinnerAbort({ error }: { error: unknown }): boolean {
+  if (error instanceof Error) {
+    if (/winner selected/i.test(error.message)) {
+      return true;
+    }
+    // Some runtimes expose the abort reason separately.
+    const reason = (error as Error & { reason?: unknown; cause?: unknown }).reason;
+    const cause = (error as Error & { reason?: unknown; cause?: unknown }).cause;
+    const detail =
+      typeof reason === "string" || typeof cause === "string"
+        ? `${reason ?? ""} ${cause ?? ""}`
+        : "";
+    if (/winner selected/i.test(detail)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function getChainRegistry({ env }: { env: Env }): Promise<ChainRegistry> {
@@ -1271,11 +1290,16 @@ function isDegradedRpcError({ value }: { value: unknown }): boolean {
     };
   };
 
-  if (
-    typeof candidate.error?.code === "number" &&
-    (candidate.error.code === 403 || candidate.error.code === 429)
-  ) {
-    return true;
+  if (typeof candidate.error?.code === "number") {
+    // Provider-level "you can't use this" codes: 429 (rate limit), 403
+    // (forbidden), and the common negative "limit exceeded" codes from
+    // Infura/Alchemy/Pokt-style gateways.
+    if (candidate.error.code === 403 || candidate.error.code === 429) {
+      return true;
+    }
+    if (candidate.error.code === -32005 || candidate.error.code === -32006) {
+      return true;
+    }
   }
 
   const message =
@@ -1284,16 +1308,27 @@ function isDegradedRpcError({ value }: { value: unknown }): boolean {
   const combined = `${message} ${data}`;
 
   return (
-    /\bauth/.test(combined) ||
+    /\bauth\b/.test(combined) ||
     /api\s?key/.test(combined) ||
-    /\bauthentication/.test(combined) ||
-    /\bforbidden/.test(combined) ||
+    /\bauthentication\b/.test(combined) ||
+    /\bforbidden\b/.test(combined) ||
     /not authorized/.test(combined) ||
-    /rate limit/.test(combined) ||
+    /rate ?limit/.test(combined) ||
     /too many requests/.test(combined) ||
-    /\bsubscription/.test(combined) ||
-    /payment/.test(combined) ||
-    /quota/.test(combined) ||
+    /request ?limit/.test(combined) ||
+    /(?:exceeded|exceeds|reached|reach) .*(?:limit|cap|budget)/.test(combined) ||
+    /limit (?:exceeded|reached)/.test(combined) ||
+    /slow\s?down/.test(combined) ||
+    /frequency (?:too|is too) high/.test(combined) ||
+    /allowance (?:exceeded|insufficient|spent)/.test(combined) ||
+    /daily (?:request )?limit/.test(combined) ||
+    /\bsubscription\b/.test(combined) ||
+    /\bpayment\b/.test(combined) ||
+    /\bquota\b/.test(combined) ||
+    /\bthrottled\b/.test(combined) ||
+    /\bdenied\b/.test(combined) ||
+    /\brestricted\b/.test(combined) ||
+    /credit (?:limit|exhausted|insufficient)/.test(combined) ||
     /needs?\s+an account/.test(combined) ||
     /requires?\s+an account/.test(combined)
   );
