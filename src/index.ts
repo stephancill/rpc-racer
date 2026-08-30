@@ -117,6 +117,11 @@ const DEFAULT_ALCHEMY_NETWORK_CONFIG_URL =
 const INTERNAL_CHAINLIST_CACHE_KEY = "https://rpc-racer.internal/chainlist-rpcs";
 const INTERNAL_ALCHEMY_CACHE_KEY = "https://rpc-racer.internal/alchemy-network-config";
 const BLOCK_SPEED_STORAGE_KEY = "blockSpeeds";
+const BLOCK_SPEED_ATTEMPT_STORAGE_KEY = "blockSpeedAttempts";
+// Failed chains are re-attempted once they've been "cold" for this long, so a
+// later estimate (e.g. via the Alchemy fallback) can pick them up without
+// busy-looping on dead endpoints.
+const BLOCK_SPEED_RETRY_MS = 5 * 60_000;
 // How long a worker isolate caches the block-speed map before asking the
 // metrics DurableObject for a fresh snapshot.
 const BLOCK_SPEED_SNAPSHOT_TTL_MS = 30_000;
@@ -180,6 +185,7 @@ let rpcHealthMemoryCache: { expiresAt: number; blocked: Set<string> } | null = n
 let blockSpeedsMemoryCache: {
   expiresAt: number;
   byChainId: Map<number, number | null>;
+  attempts: Map<number, number>;
 } | null = null;
 
 export default {
@@ -285,7 +291,7 @@ async function handleGetChain({
   const blockSpeeds = await readBlockSpeedsMap({ env });
   ctx.waitUntil(refreshBlockSpeeds({ env }));
 
-  const blockSpeedMs = blockSpeedMsOrUndefined(blockSpeeds.get(chain.chainId));
+  const blockSpeedMs = blockSpeedMsOrUndefined(blockSpeeds.byChainId.get(chain.chainId));
   return jsonResponse({
     ...chain,
     ...(blockSpeedMs !== undefined && { blockSpeedMs }),
@@ -307,7 +313,7 @@ async function handleListChains({
   ctx.waitUntil(refreshBlockSpeeds({ env }));
 
   const chains = registry.orderedChains.map((chain) => {
-    const blockSpeedMs = blockSpeedMsOrUndefined(blockSpeeds.get(chain.chainId));
+    const blockSpeedMs = blockSpeedMsOrUndefined(blockSpeeds.byChainId.get(chain.chainId));
     if (includeRpcUrls) {
       return {
         ...chain,
@@ -327,7 +333,9 @@ async function handleListChains({
     };
   });
 
-  const covered = [...blockSpeeds.values()].filter((value) => value !== null && value > 0).length;
+  const covered = [...blockSpeeds.byChainId.values()].filter(
+    (value) => value !== null && value > 0,
+  ).length;
 
   return jsonResponse({
     total: chains.length,
@@ -1261,34 +1269,48 @@ function providerFromUrl({ url }: { url: string }): string {
 // Reads the persisted chain->blockSpeedMs map, using a short-lived isolate
 // cache so we don't query the metrics DurableObject on every listing. Degrades
 // to an empty map if metrics are unreachable.
-async function readBlockSpeedsMap({ env }: { env: Env }): Promise<Map<number, number | null>> {
+async function readBlockSpeedsMap({
+  env,
+}: {
+  env: Env;
+}): Promise<{ byChainId: Map<number, number | null>; attempts: Map<number, number> }> {
   const now = Date.now();
   if (blockSpeedsMemoryCache !== null && now < blockSpeedsMemoryCache.expiresAt) {
-    return blockSpeedsMemoryCache.byChainId;
+    return {
+      byChainId: blockSpeedsMemoryCache.byChainId,
+      attempts: blockSpeedsMemoryCache.attempts,
+    };
   }
 
   const byChainId = new Map<number, number | null>();
+  const attempts = new Map<number, number>();
   try {
     const stub = env.METRICS_DO.get(env.METRICS_DO.idFromName("global"));
     const response = await stub.fetch("https://metrics.internal/block-speeds");
     if (response.ok) {
-      const payload = (await response.json()) as { blockSpeeds?: Record<string, number | null> };
+      const payload = (await response.json()) as {
+        blockSpeeds?: Record<string, number | null>;
+        attempts?: Record<string, number>;
+      };
       for (const [chainIdRaw, milliseconds] of Object.entries(payload.blockSpeeds ?? {})) {
         const chainId = Number.parseInt(chainIdRaw, 10);
         if (Number.isFinite(chainId) && (milliseconds === null || Number.isFinite(milliseconds))) {
           byChainId.set(chainId, milliseconds);
         }
       }
+      for (const [chainIdRaw, attemptedAt] of Object.entries(payload.attempts ?? {})) {
+        const chainId = Number.parseInt(chainIdRaw, 10);
+        if (Number.isFinite(chainId) && Number.isFinite(attemptedAt)) {
+          attempts.set(chainId, attemptedAt);
+        }
+      }
     }
   } catch {
-    // Fall through with an empty map; retry on the next request.
+    // Fall through with empty maps; retry on the next request.
   }
 
-  blockSpeedsMemoryCache = {
-    expiresAt: now + BLOCK_SPEED_SNAPSHOT_TTL_MS,
-    byChainId,
-  };
-  return byChainId;
+  blockSpeedsMemoryCache = { expiresAt: now + BLOCK_SPEED_SNAPSHOT_TTL_MS, byChainId, attempts };
+  return { byChainId, attempts };
 }
 
 async function writeBlockSpeed({
@@ -1316,16 +1338,30 @@ async function writeBlockSpeed({
   }
 }
 
-// Estimates block speed (avg milliseconds between blocks) for the given RPC
-// URLs, sampling a few heights back through history for stability. Tries a
-// small fanout of distinct endpoints; the first that produces a valid result
-// wins. Returns null when no endpoint serves a usable answer.
+// Estimates block speed (avg milliseconds between blocks) for a chain. Tries a
+// small fanout of the chain's own public RPC endpoints first, then Alchemy's
+// node for this chain (via the network slug map) as a reliable fallback for
+// chains whose free public RPCs are unusable. The first source that produces a
+// valid result wins. Returns null when no source serves a usable answer.
 async function computeChainBlockSpeedMs({
+  env,
+  chainId,
   rpcUrls,
 }: {
+  env: Env;
+  chainId: number;
   rpcUrls: string[];
 }): Promise<number | null> {
-  const candidates = shuffleRpcUrls({ urls: rpcUrls }).slice(0, BLOCK_SPEED_CANDIDATES);
+  const candidates: string[] = [];
+  for (const url of shuffleRpcUrls({ urls: rpcUrls }).slice(0, BLOCK_SPEED_CANDIDATES)) {
+    candidates.push(url);
+  }
+
+  const alchemyUrl = await alchemyChainUrl({ env, chainId });
+  if (alchemyUrl !== null) {
+    candidates.push(alchemyUrl);
+  }
+
   for (const url of candidates) {
     const milliseconds = await tryComputeBlockSpeedMs({ url });
     if (milliseconds !== null) {
@@ -1333,6 +1369,31 @@ async function computeChainBlockSpeedMs({
     }
   }
   return null;
+}
+
+// Builds the Alchemy JSON-RPC URL for a chain id, or null when there's no API
+// key configured or the chain isn't served by the Alchemy node API.
+async function alchemyChainUrl({
+  env,
+  chainId,
+}: {
+  env: Env;
+  chainId: number;
+}): Promise<string | null> {
+  const apiKey = env.ALCHEMY_API_KEY?.trim();
+  if (apiKey === undefined || apiKey.length === 0) {
+    return null;
+  }
+  try {
+    const slugByChainId = await getAlchemyNetworkSlugMap({ env });
+    const slug = slugByChainId.get(chainId);
+    if (slug === undefined) {
+      return null;
+    }
+    return `https://${slug}.g.alchemy.com/v2/${apiKey}`;
+  } catch {
+    return null;
+  }
 }
 
 async function tryComputeBlockSpeedMs({ url }: { url: string }): Promise<number | null> {
@@ -1431,13 +1492,27 @@ async function rpcFetch({
 // full chain set.
 async function refreshBlockSpeeds({ env }: { env: Env }): Promise<void> {
   try {
+    const now = Date.now();
     const [current, registry] = await Promise.all([
       readBlockSpeedsMap({ env }),
       getChainRegistry({ env }),
     ]);
 
     const missing = registry.orderedChains
-      .filter((chain) => !current.has(chain.chainId))
+      .filter((chain) => {
+        const value = current.byChainId.get(chain.chainId);
+        if (value !== undefined && value !== null) {
+          return false; // already has a stored value
+        }
+        // A previously-failed chain is retried once its attempt has gone cold,
+        // so later sources (e.g. the Alchemy fallback) can pick it up without
+        // busy-looping on dead endpoints.
+        const attemptedAt = current.attempts.get(chain.chainId) ?? 0;
+        if (value === null && now - attemptedAt < BLOCK_SPEED_RETRY_MS) {
+          return false;
+        }
+        return true;
+      })
       .slice(0, BLOCK_SPEED_BATCH);
 
     if (missing.length === 0) {
@@ -1448,7 +1523,11 @@ async function refreshBlockSpeeds({ env }: { env: Env }): Promise<void> {
       items: missing,
       concurrency: BLOCK_SPEED_CONCURRENCY,
       worker: async (chain) => {
-        const milliseconds = await computeChainBlockSpeedMs({ rpcUrls: chain.rpcUrls });
+        const milliseconds = await computeChainBlockSpeedMs({
+          env,
+          chainId: chain.chainId,
+          rpcUrls: chain.rpcUrls,
+        });
         // Store the value, or a null marker so a failed chain isn't retried on
         // every pass (which would otherwise stall the sweep on dead endpoints).
         await writeBlockSpeed({ env, chainId: chain.chainId, milliseconds });
@@ -1768,8 +1847,11 @@ export class MetricsDurableObject {
     }
 
     if (request.method === "GET" && url.pathname === "/block-speeds") {
-      const blockSpeeds = await this.readBlockSpeeds();
-      return jsonResponse({ blockSpeeds, computedAt: Date.now() });
+      const [blockSpeeds, attempts] = await Promise.all([
+        this.readBlockSpeeds(),
+        this.readBlockSpeedAttempts(),
+      ]);
+      return jsonResponse({ blockSpeeds, attempts, computedAt: Date.now() });
     }
 
     if (request.method === "POST" && url.pathname === "/block-speed") {
@@ -1791,6 +1873,10 @@ export class MetricsDurableObject {
       const blockSpeeds = await this.readBlockSpeeds();
       blockSpeeds[chainId] = milliseconds as number | null;
       await this.state.storage.put(BLOCK_SPEED_STORAGE_KEY, blockSpeeds);
+
+      const attempts = await this.readBlockSpeedAttempts();
+      attempts[chainId] = Date.now();
+      await this.state.storage.put(BLOCK_SPEED_ATTEMPT_STORAGE_KEY, attempts);
       return jsonResponse({ ok: true });
     }
 
@@ -1882,6 +1968,13 @@ export class MetricsDurableObject {
   private async readBlockSpeeds(): Promise<Record<number, number | null>> {
     const stored =
       await this.state.storage.get<Record<number, number | null>>(BLOCK_SPEED_STORAGE_KEY);
+    return stored ?? {};
+  }
+
+  private async readBlockSpeedAttempts(): Promise<Record<number, number>> {
+    const stored = await this.state.storage.get<Record<number, number>>(
+      BLOCK_SPEED_ATTEMPT_STORAGE_KEY,
+    );
     return stored ?? {};
   }
 
