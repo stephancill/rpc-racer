@@ -31,4 +31,4 @@
 
 - Before committing, check `git diff` and commit only relevant files.
 - Use conventional commit messages, for example `fix: ...`, `feat: ...`, or `docs: ...`.
-- Do NOT deploy manually. Pushes to `main` auto-deploy (GitHub Actions).
+- Do NOT deploy manually. Pushes to `main` auto-deploy via the Cloudflare/GitHub integration.
