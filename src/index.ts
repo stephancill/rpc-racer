@@ -130,7 +130,7 @@ const BLOCK_SPEED_SNAPSHOT_TTL_MS = 30_000;
 // that incrementally covers the whole set over time.
 const BLOCK_SPEED_BATCH = 30;
 const BLOCK_SPEED_CONCURRENCY = 10;
-const BLOCK_SPEED_CANDIDATES = 2;
+const BLOCK_SPEED_CANDIDATES = 4;
 const BLOCK_SPEED_SAMPLES = 5;
 const BLOCK_SPEED_STRIDE = 8;
 const BLOCK_SPEED_TIMEOUT_MS = 1_200;
