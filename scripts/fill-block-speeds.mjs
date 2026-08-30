@@ -23,8 +23,9 @@ console.log(`Filling block speeds from ${baseUrl} (poll=${pollMs}ms, maxWait=${m
 
 const startedAt = Date.now();
 let lastCovered = -1;
-let lastReportAt = 0;
+let lastProgressAt = Date.now();
 let totalSeen = 0;
+const STALE_MS = 60_000; // report done when no progress for this long
 
 while (Date.now() - startedAt < maxWaitMs) {
   const payload = await fetchRegistry({ baseUrl });
@@ -32,15 +33,22 @@ while (Date.now() - startedAt < maxWaitMs) {
   const covered = payload.covered ?? 0;
   totalSeen = total;
 
-  if (Date.now() - lastReportAt > 10_000 || covered !== lastCovered) {
-    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-    console.log(`covered ${covered}/${total} (${elapsed}s)`);
-    lastCovered = covered;
-    lastReportAt = Date.now();
-  }
+  const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+  console.log(`covered ${covered}/${total} (${elapsed}s)`);
 
   if (covered >= total) {
-    console.log(`\nDone: ${covered}/${total} chains have blockSpeedsMs.`);
+    console.log(`\nDone: ${covered}/${total} chains have a blockSpeedMs.`);
+    process.exit(0);
+  }
+
+  if (covered !== lastCovered) {
+    lastProgressAt = Date.now();
+    lastCovered = covered;
+  } else if (Date.now() - lastProgressAt >= STALE_MS) {
+    console.log(
+      `\nNo progress for ${STALE_MS / 1000}s at ${covered}/${total}. ` +
+        "Remaining chains have no publicly usable RPC, so no value is stored.",
+    );
     process.exit(0);
   }
 

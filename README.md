@@ -42,9 +42,11 @@ Production base URL: `https://evm.stupidtech.net`
 `blockSpeedMs` is an estimated average block interval for a chain, measured by probing the chain's own RPCs: `eth_blockNumber` followed by a few historical `eth_getBlockByNumber` reads, then dividing the timestamp span by the block count.
 
 - Computed only for chains that do not yet have a stored value.
+- Chains whose public RPCs don't respond are marked attempted and not retried on every pass, so the sweep advances through the whole set rather than stalling on dead endpoints. Such chains simply won't have a `blockSpeedMs`. The listing reports `covered` (the number of chains with a stored value) alongside `total`.
 - Persisted in the `MetricsDurableObject` (survives across requests/refreshes).
 - Sampling runs in the background (`ctx.waitUntil`) during `/v1/chains` refreshes, with a small number of chains estimated per pass, so the full set fills in over time.
 - Reported in **milliseconds**.
+- `scripts/fill-block-speeds.mjs` drives the refresh to completion (it polls `/v1/chains` and exits once coverage stops growing — remaining chains have no usable public RPC).
 
 ## Chain Selection
 

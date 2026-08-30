@@ -176,7 +176,10 @@ const alchemyNetworkConfigSchema = z.object({
 let chainMemoryCache: { expiresAt: number; registry: ChainRegistry } | null = null;
 let alchemyMemoryCache: { expiresAt: number; slugByChainId: Map<number, string> } | null = null;
 let rpcHealthMemoryCache: { expiresAt: number; blocked: Set<string> } | null = null;
-let blockSpeedsMemoryCache: { expiresAt: number; byChainId: Map<number, number> } | null = null;
+let blockSpeedsMemoryCache: {
+  expiresAt: number;
+  byChainId: Map<number, number | null>;
+} | null = null;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -247,6 +250,16 @@ export default {
   },
 };
 
+// Returns a positive finite block-speed value as a number for serving, or
+// undefined when there's no usable value stored (including the null marker used
+// for attempted-but-unestimable chains).
+function blockSpeedMsOrUndefined(value: number | null | undefined): number | undefined {
+  if (value !== null && typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  return undefined;
+}
+
 async function handleGetChain({
   env,
   ctx,
@@ -271,9 +284,10 @@ async function handleGetChain({
   const blockSpeeds = await readBlockSpeedsMap({ env });
   ctx.waitUntil(refreshBlockSpeeds({ env }));
 
+  const blockSpeedMs = blockSpeedMsOrUndefined(blockSpeeds.get(chain.chainId));
   return jsonResponse({
     ...chain,
-    ...(blockSpeeds.has(chain.chainId) && { blockSpeedMs: blockSpeeds.get(chain.chainId) }),
+    ...(blockSpeedMs !== undefined && { blockSpeedMs }),
   });
 }
 
@@ -292,11 +306,11 @@ async function handleListChains({
   ctx.waitUntil(refreshBlockSpeeds({ env }));
 
   const chains = registry.orderedChains.map((chain) => {
-    const blockSpeed = blockSpeeds.get(chain.chainId);
+    const blockSpeedMs = blockSpeedMsOrUndefined(blockSpeeds.get(chain.chainId));
     if (includeRpcUrls) {
       return {
         ...chain,
-        ...(blockSpeed !== undefined && { blockSpeedMs: blockSpeed }),
+        ...(blockSpeedMs !== undefined && { blockSpeedMs }),
       };
     }
 
@@ -308,13 +322,15 @@ async function handleListChains({
       isTestnet: chain.isTestnet,
       aliases: chain.aliases,
       rpcUrlCount: chain.rpcUrls.length,
-      ...(blockSpeed !== undefined && { blockSpeedMs: blockSpeed }),
+      ...(blockSpeedMs !== undefined && { blockSpeedMs }),
     };
   });
 
+  const covered = [...blockSpeeds.values()].filter((value) => value !== null && value > 0).length;
+
   return jsonResponse({
     total: chains.length,
-    covered: blockSpeeds.size,
+    covered,
     includeRpcUrls,
     chains,
   });
@@ -1244,21 +1260,21 @@ function providerFromUrl({ url }: { url: string }): string {
 // Reads the persisted chain->blockSpeedMs map, using a short-lived isolate
 // cache so we don't query the metrics DurableObject on every listing. Degrades
 // to an empty map if metrics are unreachable.
-async function readBlockSpeedsMap({ env }: { env: Env }): Promise<Map<number, number>> {
+async function readBlockSpeedsMap({ env }: { env: Env }): Promise<Map<number, number | null>> {
   const now = Date.now();
   if (blockSpeedsMemoryCache !== null && now < blockSpeedsMemoryCache.expiresAt) {
     return blockSpeedsMemoryCache.byChainId;
   }
 
-  const byChainId = new Map<number, number>();
+  const byChainId = new Map<number, number | null>();
   try {
     const stub = env.METRICS_DO.get(env.METRICS_DO.idFromName("global"));
     const response = await stub.fetch("https://metrics.internal/block-speeds");
     if (response.ok) {
-      const payload = (await response.json()) as { blockSpeeds?: Record<string, number> };
+      const payload = (await response.json()) as { blockSpeeds?: Record<string, number | null> };
       for (const [chainIdRaw, milliseconds] of Object.entries(payload.blockSpeeds ?? {})) {
         const chainId = Number.parseInt(chainIdRaw, 10);
-        if (Number.isFinite(chainId) && Number.isFinite(milliseconds) && milliseconds > 0) {
+        if (Number.isFinite(chainId) && (milliseconds === null || Number.isFinite(milliseconds))) {
           byChainId.set(chainId, milliseconds);
         }
       }
@@ -1281,7 +1297,7 @@ async function writeBlockSpeed({
 }: {
   env: Env;
   chainId: number;
-  milliseconds: number;
+  milliseconds: number | null;
 }): Promise<void> {
   try {
     const stub = env.METRICS_DO.get(env.METRICS_DO.idFromName("global"));
@@ -1432,9 +1448,9 @@ async function refreshBlockSpeeds({ env }: { env: Env }): Promise<void> {
       concurrency: BLOCK_SPEED_CONCURRENCY,
       worker: async (chain) => {
         const milliseconds = await computeChainBlockSpeedMs({ rpcUrls: chain.rpcUrls });
-        if (milliseconds !== null) {
-          await writeBlockSpeed({ env, chainId: chain.chainId, milliseconds });
-        }
+        // Store the value, or a null marker so a failed chain isn't retried on
+        // every pass (which would otherwise stall the sweep on dead endpoints).
+        await writeBlockSpeed({ env, chainId: chain.chainId, milliseconds });
       },
     });
   } catch {
@@ -1766,14 +1782,13 @@ export class MetricsDurableObject {
       if (
         typeof chainId !== "number" ||
         !Number.isInteger(chainId) ||
-        typeof milliseconds !== "number" ||
-        !Number.isFinite(milliseconds) ||
-        milliseconds <= 0
+        (milliseconds !== null &&
+          (typeof milliseconds !== "number" || !Number.isFinite(milliseconds) || milliseconds <= 0))
       ) {
         return jsonResponse({ error: "Invalid chainId or milliseconds" }, { status: 400 });
       }
       const blockSpeeds = await this.readBlockSpeeds();
-      blockSpeeds[chainId] = milliseconds;
+      blockSpeeds[chainId] = milliseconds as number | null;
       await this.state.storage.put(BLOCK_SPEED_STORAGE_KEY, blockSpeeds);
       return jsonResponse({ ok: true });
     }
@@ -1863,8 +1878,9 @@ export class MetricsDurableObject {
     return stored ?? {};
   }
 
-  private async readBlockSpeeds(): Promise<Record<number, number>> {
-    const stored = await this.state.storage.get<Record<number, number>>(BLOCK_SPEED_STORAGE_KEY);
+  private async readBlockSpeeds(): Promise<Record<number, number | null>> {
+    const stored =
+      await this.state.storage.get<Record<number, number | null>>(BLOCK_SPEED_STORAGE_KEY);
     return stored ?? {};
   }
 
