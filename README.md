@@ -26,6 +26,9 @@ Production base URL: `https://evm.stupidtech.net`
     - chain alias (for example `ethereum`, `base`, `arbitrum`, `tempo`)
   - Query params:
     - `timeoutMs` (optional, integer `200`-`10000`, default `2000`)
+    - `fanoutCount` (optional, integer `1`-`5`, default `5`) — how many random
+      upstreams to race per request. Lower it (e.g. `2`) to reduce request
+      amplification for sustained scanner/monitor traffic.
     - `testnet` (optional, any present value enables testnet selection)
 
 - `GET /v1/chains`

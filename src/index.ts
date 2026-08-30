@@ -97,7 +97,9 @@ type RpcHealthEntry = {
 type RpcHealthMap = Record<string, RpcHealthEntry>;
 
 const DAY_IN_SECONDS = 86_400;
-const RANDOM_RACE_FANOUT = 5;
+// Maximum race fan-out; a client may lower it per-request via the `fanoutCount`
+// query param (defaults to this maximum).
+const MAX_RANDOM_RACE_FANOUT = 5;
 const MAX_CHAIN_METHOD_LATENCY_SAMPLES = 1000;
 const COUNTERS_STORAGE_KEY = "counters";
 const SAMPLES_KEY_PREFIX = "samples:";
@@ -141,6 +143,7 @@ const routeSchema = z.object({
 
 const querySchema = z.object({
   timeoutMs: z.coerce.number().int().min(200).max(10_000).optional(),
+  fanoutCount: z.coerce.number().int().min(1).max(MAX_RANDOM_RACE_FANOUT).optional(),
 });
 
 const jsonRpcSchema = z
@@ -391,6 +394,7 @@ async function handleRaceRpc({
 
   const parsedQuery = querySchema.safeParse({
     timeoutMs: query.get("timeoutMs") ?? undefined,
+    fanoutCount: query.get("fanoutCount") ?? undefined,
   });
   if (!parsedQuery.success) {
     return finalizeRpcResponse({
@@ -469,11 +473,12 @@ async function handleRaceRpc({
   }
 
   const timeoutMs = parsedQuery.data.timeoutMs ?? defaultTimeoutMs;
+  const fanoutCount = parsedQuery.data.fanoutCount ?? MAX_RANDOM_RACE_FANOUT;
 
   const blockedUrls = await getBlockedRpcUrls({ env });
   const candidateUrls = selectRandomRpcUrls({
     rpcUrls: chain.rpcUrls,
-    count: RANDOM_RACE_FANOUT,
+    count: fanoutCount,
     blockedUrls,
   });
   if (candidateUrls.length === 0) {
