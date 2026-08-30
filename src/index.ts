@@ -124,10 +124,11 @@ const BLOCK_SPEED_SNAPSHOT_TTL_MS = 30_000;
 // that do not yet have a stored value, so this is a bounded, inexpensive job
 // that incrementally covers the whole set over time.
 const BLOCK_SPEED_BATCH = 30;
-const BLOCK_SPEED_CONCURRENCY = 6;
+const BLOCK_SPEED_CONCURRENCY = 10;
+const BLOCK_SPEED_CANDIDATES = 2;
 const BLOCK_SPEED_SAMPLES = 5;
 const BLOCK_SPEED_STRIDE = 8;
-const BLOCK_SPEED_TIMEOUT_MS = 2_000;
+const BLOCK_SPEED_TIMEOUT_MS = 1_200;
 
 const routeSchema = z.object({
   chainId: z.coerce.number().int().positive(),
@@ -1324,7 +1325,7 @@ async function computeChainBlockSpeedMs({
 }: {
   rpcUrls: string[];
 }): Promise<number | null> {
-  const candidates = shuffleRpcUrls({ urls: rpcUrls }).slice(0, 3);
+  const candidates = shuffleRpcUrls({ urls: rpcUrls }).slice(0, BLOCK_SPEED_CANDIDATES);
   for (const url of candidates) {
     const milliseconds = await tryComputeBlockSpeedMs({ url });
     if (milliseconds !== null) {
