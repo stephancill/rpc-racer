@@ -102,6 +102,7 @@ const DAY_IN_SECONDS = 86_400;
 // Maximum race fan-out; a client may lower it per-request via the `fanoutCount`
 // query param (defaults to this maximum).
 const MAX_RANDOM_RACE_FANOUT = 5;
+const MIN_ALCHEMY_FALLBACK_TIMEOUT_MS = 5_000;
 const MAX_CHAIN_METHOD_LATENCY_SAMPLES = 1000;
 const COUNTERS_STORAGE_KEY = "counters";
 const SAMPLES_KEY_PREFIX = "samples:";
@@ -580,7 +581,7 @@ async function handleRaceRpc({
           chainId: chain.chainId,
           requestBody,
           env,
-          timeoutMs,
+          timeoutMs: Math.max(timeoutMs, MIN_ALCHEMY_FALLBACK_TIMEOUT_MS),
         })
       : null;
 
@@ -590,7 +591,7 @@ async function handleRaceRpc({
         status: alchemy.status,
         headers: {
           "content-type": "application/json; charset=utf-8",
-          "x-rpc-upstream": alchemy.url,
+          "x-rpc-upstream": new URL(alchemy.url).origin,
           "x-rpc-provider": provider,
           "x-rpc-chain-id": String(chain.chainId),
           "x-rpc-chain-name": chain.name,
@@ -899,7 +900,8 @@ async function raceRequests({
     return {
       winner,
       errorResponse: firstJsonRpcErrorResponse,
-      shouldTryAlchemyFallback: stateIssueErrorsObserved > 0 || degradedErrorsObserved > 0,
+      shouldTryAlchemyFallback:
+        firstTransportError !== null || stateIssueErrorsObserved > 0 || degradedErrorsObserved > 0,
       urlResults,
       ...(failure !== undefined && { failure }),
     };
@@ -1282,6 +1284,10 @@ function isJsonRpcResponse({ value }: { value: unknown }): boolean {
 }
 
 function isJsonRpcError({ value }: { value: unknown }): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => isJsonRpcError({ value: entry }));
+  }
+
   if (typeof value !== "object" || value === null) {
     return false;
   }
@@ -1299,6 +1305,10 @@ function formatAttemptError({ error }: { error: unknown }): string {
 }
 
 function isLikelyStateIssueError({ value }: { value: unknown }): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => isLikelyStateIssueError({ value: entry }));
+  }
+
   if (!isJsonRpcError({ value })) {
     return false;
   }
@@ -1321,6 +1331,7 @@ function isLikelyStateIssueError({ value }: { value: unknown }): boolean {
     combined.includes("state is not available") ||
     combined.includes("state unavailable") ||
     combined.includes("header not found") ||
+    combined.includes("invalid block range") ||
     combined.includes("requested data is not available") ||
     combined.includes("requested state is not available") ||
     combined.includes("pruned")
@@ -1332,6 +1343,10 @@ function isLikelyStateIssueError({ value }: { value: unknown }): boolean {
 // answer (like `execution reverted`). Only these count against an endpoint's
 // health; honest reverted errors do not.
 function isDegradedRpcError({ value }: { value: unknown }): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => isDegradedRpcError({ value: entry }));
+  }
+
   if (!isJsonRpcError({ value })) {
     return false;
   }

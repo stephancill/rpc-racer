@@ -7,7 +7,7 @@ Production base URL: `https://evm.stupidtech.net`
 `evm.stupidtech.net` is a JSON-RPC proxy that races multiple public RPC providers and returns the first successful response.
 
 - Races 5 random HTTPS RPC endpoints per request
-- Falls back to Alchemy only when public RPC responses indicate likely state availability issues
+- Falls back to Alchemy when public RPCs are unavailable, rate-limited, or missing requested state
 - Caches chain metadata from Chainlist and Alchemy network config
 
 ## Endpoints
@@ -25,7 +25,8 @@ Production base URL: `https://evm.stupidtech.net`
     - numeric chain ID (for example `1`, `8453`, `42161`)
     - chain alias (for example `ethereum`, `base`, `arbitrum`, `tempo`)
   - Query params:
-    - `timeoutMs` (optional, integer `200`-`10000`, default `2000`)
+    - `timeoutMs` (optional, integer `200`-`10000`, default `2000`) — timeout
+      for each public upstream; the Alchemy fallback gets at least 5 seconds.
     - `fanoutCount` (optional, integer `1`-`5`, default `5`) — how many random
       upstreams to race per request. Lower it (e.g. `2`) to reduce request
       amplification for sustained scanner/monitor traffic.
@@ -89,13 +90,13 @@ Example single request:
 ## Response Headers
 
 - `x-rpc-provider`: hostname of winning upstream provider
-- `x-rpc-upstream`: full winning upstream URL
+- `x-rpc-upstream`: winning upstream URL; credential-bearing fallback paths are omitted
 - `x-rpc-chain-id`: resolved chain ID
 - `x-rpc-chain-name`: resolved chain name
 - `x-rpc-fallback`: present with value `alchemy` when fallback was used
 - `x-rpc-alchemy-attempted`: present on upstream error responses with whether Alchemy fallback was attempted
 
-When every public RPC returns an error, the first valid JSON-RPC error body and its HTTP status are returned unchanged. Alchemy is attempted first only for likely state-availability errors.
+When every public RPC returns an error, the first valid JSON-RPC error body and its HTTP status are returned unchanged. Alchemy is attempted first for transport failures, provider degradation such as rate limits, or likely state-availability errors.
 
 ## Example Calls
 
