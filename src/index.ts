@@ -453,16 +453,56 @@ async function handleRaceRpc({
     });
   }
 
-  const validatedBody = jsonRpcSchema.safeParse(parsedBody);
-  if (!validatedBody.success) {
-    return finalizeRpcResponse({
-      env,
-      ctx,
-      startedAt,
-      response: jsonResponse({ error: "Body must be a JSON-RPC 2.0 request" }, { status: 400 }),
-      fallbackUsed: false,
-      caller,
-    });
+  // Accept either a single JSON-RPC 2.0 request or a JSON-RPC 2.0 batch (array).
+  // A batch is forwarded whole (each item validated) and the array comes back
+  // as-is, so a client can collapse many calls into one Worker request.
+  let rpcMethod: string;
+  let requestBody: string;
+  let jsonRpcId: unknown = null;
+  if (Array.isArray(parsedBody)) {
+    if (parsedBody.length === 0) {
+      return finalizeRpcResponse({
+        env,
+        ctx,
+        startedAt,
+        response: jsonResponse({ error: "Empty JSON-RPC batch" }, { status: 400 }),
+        fallbackUsed: false,
+        caller,
+      });
+    }
+    for (const item of parsedBody) {
+      const itemRequest = jsonRpcSchema.safeParse(item);
+      if (!itemRequest.success || isDisallowedRpcMethod({ method: itemRequest.data.method })) {
+        return finalizeRpcResponse({
+          env,
+          ctx,
+          startedAt,
+          response: jsonResponse(
+            { error: "Batch must contain only supported JSON-RPC 2.0 requests" },
+            { status: 400 },
+          ),
+          fallbackUsed: false,
+          caller,
+        });
+      }
+    }
+    rpcMethod = "batch";
+    requestBody = JSON.stringify(parsedBody);
+  } else {
+    const validatedBody = jsonRpcSchema.safeParse(parsedBody);
+    if (!validatedBody.success) {
+      return finalizeRpcResponse({
+        env,
+        ctx,
+        startedAt,
+        response: jsonResponse({ error: "Body must be a JSON-RPC 2.0 request" }, { status: 400 }),
+        fallbackUsed: false,
+        caller,
+      });
+    }
+    rpcMethod = validatedBody.data.method;
+    jsonRpcId = validatedBody.data.id ?? null;
+    requestBody = JSON.stringify(validatedBody.data);
   }
 
   const registry = await getChainRegistry({ env });
@@ -484,7 +524,6 @@ async function handleRaceRpc({
   }
 
   const defaultTimeoutMs = parsePositiveInt({ value: env.DEFAULT_TIMEOUT_MS, fallback: 2_500 });
-  const rpcMethod = validatedBody.data.method;
 
   if (isDisallowedRpcMethod({ method: rpcMethod })) {
     return finalizeRpcResponse({
@@ -498,7 +537,7 @@ async function handleRaceRpc({
             code: -32601,
             message: "Provider-specific methods are not supported",
           },
-          id: validatedBody.data.id ?? null,
+          id: jsonRpcId,
         },
         { status: 400 },
       ),
@@ -531,7 +570,6 @@ async function handleRaceRpc({
     });
   }
 
-  const requestBody = JSON.stringify(validatedBody.data);
   const raceResult = await raceRequests({ candidateUrls, requestBody, timeoutMs });
   const urlResults = raceResult.urlResults;
   if (raceResult.winner === null) {
@@ -1223,6 +1261,18 @@ function safeJsonParse({ value }: { value: string }): unknown {
 }
 
 function isJsonRpcResponse({ value }: { value: unknown }): boolean {
+  if (Array.isArray(value)) {
+    // JSON-RPC 2.0 batch: at least one entry, every entry a 2.0 response.
+    if (value.length === 0) return false;
+    return value.every((entry) => {
+      return (
+        typeof entry === "object" &&
+        entry !== null &&
+        (entry as { jsonrpc?: unknown }).jsonrpc === "2.0"
+      );
+    });
+  }
+
   if (typeof value !== "object" || value === null) {
     return false;
   }

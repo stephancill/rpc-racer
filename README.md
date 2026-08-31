@@ -69,9 +69,13 @@ For `POST /v1/:chain` when `:chain` is a name/alias:
 
 ## Request Format
 
-`POST /v1/:chain` expects a JSON-RPC 2.0 request body.
+`POST /v1/:chain` expects a single JSON-RPC 2.0 request body, **or a JSON-RPC
+2.0 batch** (an array of requests, e.g. `[{"jsonrpc":"2.0",...}, {...}]`). A
+batch is forwarded whole to the upstreams and the array is returned unchanged,
+so callers can collapse many JSON-RPC calls into one HTTP request (and one
+billed Worker request).
 
-Example:
+Example single request:
 
 ```json
 {
