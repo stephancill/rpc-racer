@@ -2355,44 +2355,60 @@ export class MetricsDurableObject {
   }
 
   private async recordRpcHealth({ urlResults }: { urlResults: RpcAttemptHealth[] }): Promise<void> {
-    const health = await this.readRpcHealth();
     const now = Date.now();
+    const health = await this.readRpcHealth();
+
+    // Keep only state we need to carry forward: partial failure tallies or an
+    // active cooldown. Fully-healthy entries are dropped, which avoids rewriting
+    // the whole map for the common (healthy) case.
+    const flagged = new Map<string, RpcHealthEntry>();
+    for (const [url, entry] of Object.entries(health)) {
+      if (entry.blockedUntil > now || entry.consecutiveFailures > 0) flagged.set(url, entry);
+    }
+
     let changed = false;
-
     for (const result of urlResults) {
-      let entry = health[result.url];
-      if (entry === undefined) {
-        entry = { consecutiveFailures: 0, blockedUntil: 0 };
-      }
-
+      const prev = flagged.get(result.url) ?? { consecutiveFailures: 0, blockedUntil: 0 };
+      let next: RpcHealthEntry;
       if (result.degraded) {
-        entry.consecutiveFailures += 1;
-        if (entry.consecutiveFailures >= RPC_HEALTH_FAIL_THRESHOLD) {
-          // Re-slide the cooldown while the endpoint keeps failing so a
-          // permanently paywalled endpoint stays out.
-          entry.blockedUntil = now + RPC_HEALTH_COOLDOWN_MS;
+        const consecutiveFailures = prev.consecutiveFailures + 1;
+        const blockedUntil =
+          consecutiveFailures >= RPC_HEALTH_FAIL_THRESHOLD
+            ? now + RPC_HEALTH_COOLDOWN_MS
+            : prev.blockedUntil;
+        next = { consecutiveFailures, blockedUntil };
+        // Re-slide the cooldown while the endpoint keeps failing.
+        if (consecutiveFailures >= RPC_HEALTH_FAIL_THRESHOLD && prev.blockedUntil > now) {
+          next.blockedUntil = now + RPC_HEALTH_COOLDOWN_MS;
         }
       } else {
-        // A healthy (even if honestly reverted) answer means the endpoint is
-        // serving requests again: recover it immediately.
-        entry.consecutiveFailures = 0;
-        entry.blockedUntil = 0;
+        // A healthy answer (even honestly-reverted) means the endpoint recovered.
+        next = { consecutiveFailures: 0, blockedUntil: 0 };
       }
 
-      health[result.url] = entry;
-      changed = true;
+      const persist =
+        next.blockedUntil > 0 ||
+        (next.consecutiveFailures > 0 && next.consecutiveFailures < RPC_HEALTH_FAIL_THRESHOLD);
+      const wasPersisted =
+        prev.blockedUntil > 0 ||
+        (prev.consecutiveFailures > 0 && prev.consecutiveFailures < RPC_HEALTH_FAIL_THRESHOLD);
+
+      if (persist !== wasPersisted || (persist && next.blockedUntil !== prev.blockedUntil)) {
+        changed = true;
+      }
+      if (persist) flagged.set(result.url, next);
+      else flagged.delete(result.url);
     }
 
-    if (changed) {
-      // Opportunistically drop entries with no failures and an expired window to
-      // avoid unbounded growth.
-      for (const [rpcUrl, entry] of Object.entries(health)) {
-        if (entry.consecutiveFailures === 0 && entry.blockedUntil <= now) {
-          delete health[rpcUrl];
-        }
+    if (!changed) return;
+
+    const snapshot: RpcHealthMap = {};
+    for (const [url, entry] of flagged) {
+      if (entry.blockedUntil > now || entry.consecutiveFailures > 0) {
+        snapshot[url] = entry;
       }
-      await this.state.storage.put(RPC_HEALTH_STORAGE_KEY, health);
     }
+    await this.state.storage.put(RPC_HEALTH_STORAGE_KEY, snapshot);
   }
 
   private async readChainMethodLatencySamples(): Promise<ChainMethodLatencySamples> {

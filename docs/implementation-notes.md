@@ -78,5 +78,12 @@ Tightened:
   samples buffered per `(chain, method)` in a flush so a per-method burst can't
   drive N sample writes to the DO. `/stats` percentiles stay valid from the
   bounded sample set.
+- **Provider-health persistence (2026-09-04)**: rewrote `MetricsDurableObject.recordRpcHealth`
+  so only partial-failure/active-cooldown entries are persisted, and a change is
+  written only when actual state changes. Previously every `/coalesce` with any
+  `urlResults` rewrote the full health map (incl. healthy endpoints), which was
+  the remaining downstream of the metrics-DO `rowsWritten` and the biggest block
+  to the ≥95% write-reduction target. Cooldown semantics (2-failure threshold,
+  5-min sliding window, immediate recovery on success) are preserved.
 
 </invoke>
