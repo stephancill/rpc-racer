@@ -65,4 +65,18 @@ written/48h → ~95M/month on top of the 50M/mo allowance).
 - A 24–48h post-deploy compare against the DO `rowsWritten` account metric should
   confirm ≥95% drop in metrics-DO storage writes.
 
+### 2026-09-04 (follow-up): tighten coalesced DO writes
+
+Post-deploy measurement showed metrics-DO `rowsWritten` ≈ 1/6 of the pre-fix rate
+(~85% down) but slightly short of the 95% target. The residual writes are the
+coalesced counter write, latency-sample backup writes, and provider-health /
+block-speed store, which scale with flush cadence rather than request rate.
+Tightened:
+
+- `STATS_FLUSH_INTERVAL_MS` 15s → **60s** (4× fewer coalesce POSTs / DO writes).
+- Added `MAX_LATENCY_SAMPLES_PER_METHOD_PER_WINDOW = 100`, capping the latency
+  samples buffered per `(chain, method)` in a flush so a per-method burst can't
+  drive N sample writes to the DO. `/stats` percentiles stay valid from the
+  bounded sample set.
+
 </invoke>

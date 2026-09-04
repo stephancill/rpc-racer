@@ -147,7 +147,10 @@ const BLOCK_SPEED_TIMEOUT_MS = 1_200;
 // debounced cadence, instead of one storage write per request. Detailed request
 // telemetry (caller, chain, method, outcome, provider, latency) goes to Workers
 // Analytics Engine and is not stored in the DurableObject at all.
-const STATS_FLUSH_INTERVAL_MS = 15_000;
+const STATS_FLUSH_INTERVAL_MS = 60_000;
+// Cap latency samples buffered per (chainId, method) within one coalesce window so
+// a burst on one method can't flood the DurableObject with per-sample writes.
+const MAX_LATENCY_SAMPLES_PER_METHOD_PER_WINDOW = 100;
 // Ordinary successful RPC requests are written to Analytics Engine at this
 // sample rate (10%); errors, rate-limit and fallback responses are always
 // recorded. Consumers must scale analytics totals by this inverse factor.
@@ -1897,11 +1900,16 @@ async function recordRequestTelemetry({
     const bucket = latencyBucket({ latencyMs: Math.max(0, record.latencyMs) });
     statsBuffer.latencyBuckets[bucket] = (statsBuffer.latencyBuckets[bucket] ?? 0) + 1;
     if (record.chainId !== undefined && record.method !== undefined) {
-      statsBuffer.samples.push({
-        chainId: record.chainId,
-        method: record.method,
-        latencyMs: Math.max(0, record.latencyMs),
-      });
+      const inBuffer = statsBuffer.samples.filter(
+        (s) => s.chainId === record.chainId && s.method === record.method,
+      ).length;
+      if (inBuffer < MAX_LATENCY_SAMPLES_PER_METHOD_PER_WINDOW) {
+        statsBuffer.samples.push({
+          chainId: record.chainId,
+          method: record.method,
+          latencyMs: Math.max(0, record.latencyMs),
+        });
+      }
     }
   }
   if (record.urlResults !== undefined && record.urlResults.length > 0) {
