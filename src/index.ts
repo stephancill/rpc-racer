@@ -7,6 +7,8 @@ type Env = {
   ALCHEMY_API_KEY?: string;
   INTERNAL_SECRET?: string;
   METRICS_DO: DurableObjectNamespace;
+  /** Workers Analytics Engine dataset for rpc-racer request telemetry. */
+  METRICS_ANALYTICS?: AnalyticsEngineDataset;
   ASSETS: Fetcher;
   RPC_BURST_RATE_LIMITER: RateLimit;
   RPC_SUSTAINED_RATE_LIMITER: RateLimit;
@@ -139,6 +141,47 @@ const BLOCK_SPEED_CANDIDATES = 4;
 const BLOCK_SPEED_SAMPLES = 5;
 const BLOCK_SPEED_STRIDE = 8;
 const BLOCK_SPEED_TIMEOUT_MS = 1_200;
+
+// Telemetry coalescing: request metrics are buffered per isolate and flushed to
+// the metrics DurableObject (used only for the live `/stats` snapshot) on a
+// debounced cadence, instead of one storage write per request. Detailed request
+// telemetry (caller, chain, method, outcome, provider, latency) goes to Workers
+// Analytics Engine and is not stored in the DurableObject at all.
+const STATS_FLUSH_INTERVAL_MS = 15_000;
+// Ordinary successful RPC requests are written to Analytics Engine at this
+// sample rate (10%); errors, rate-limit and fallback responses are always
+// recorded. Consumers must scale analytics totals by this inverse factor.
+const SUCCESS_SAMPLE_RATE = 0.1;
+
+type PendingLatencySample = { chainId: number; method: string; latencyMs: number };
+
+type StatsDelta = {
+  requestsServed: number;
+  fallbackResponses: number;
+  latencySumMs: number;
+  latencyCount: number;
+  latencyMaxMs: number;
+  latencyBuckets: Record<string, number>;
+  samples: PendingLatencySample[];
+  health: RpcAttemptHealth[];
+};
+
+// Per-worker-isolate accumulator. A single Worker isolate can serve many
+// concurrent requests; islands coalesce their deltas before pushing to the
+// DurableObject, collapsing the per-request count of DO storage writes.
+const statsBuffer: StatsDelta = {
+  requestsServed: 0,
+  fallbackResponses: 0,
+  latencySumMs: 0,
+  latencyCount: 0,
+  latencyMaxMs: 0,
+  latencyBuckets: {},
+  samples: [],
+  health: [],
+};
+
+let statsFlushScheduled = false;
+let lastStatsFlushAt = 0;
 
 const routeSchema = z.object({
   chainId: z.coerce.number().int().positive(),
@@ -1790,7 +1833,7 @@ function finalizeRpcResponse({
     urlResults,
   };
 
-  ctx.waitUntil(recordRpcMetrics({ env, record }));
+  ctx.waitUntil(recordRequestTelemetry({ env, ctx, record, response }));
 
   const corsHeaders = new Headers(response.headers);
   corsHeaders.set("access-control-allow-origin", "*");
@@ -1801,21 +1844,146 @@ function finalizeRpcResponse({
   });
 }
 
-async function recordRpcMetrics({
+/**
+ * Records a per-rpc-racer request. Two destinations:
+ *
+ * 1. **Workers Analytics Engine** (primary): one data point carrying caller,
+ *    chain, method, outcome, provider and latency. Ordinary successes are sampled
+ *    at `SUCCESS_SAMPLE_RATE`; errors, rate-limits and fallback responses are
+ *    always recorded.
+ * 2. **DurableObject delta** for the live `/stats` snapshot, on a debounced,
+ *    coalesced flush instead of one storage write per request.
+ */
+async function recordRequestTelemetry({
   env,
+  ctx,
   record,
+  response,
 }: {
   env: Env;
+  ctx: ExecutionContext;
   record: RpcMetricsRecord;
+  response: Response;
 }): Promise<void> {
-  const stub = env.METRICS_DO.get(env.METRICS_DO.idFromName("global"));
-  await stub.fetch("https://metrics.internal/record", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(record),
-  });
+  const analytics = env.METRICS_ANALYTICS;
+  if (analytics) {
+    const status = response.status;
+    const fallback = record.fallbackCount > 0;
+    const success = status >= 200 && status < 400 && !fallback;
+    const outcome = rpcOutcome(status, fallback);
+    const weight = success ? Math.round(1 / SUCCESS_SAMPLE_RATE) : 1;
+    const sampled = !success || Math.random() < SUCCESS_SAMPLE_RATE;
+    if (sampled) {
+      analytics.writeDataPoint({
+        indexes: [`${record.caller ?? "public"}:${record.chainId ?? "0"}`],
+        blobs: [
+          record.caller ?? "",
+          String(record.chainId ?? ""),
+          record.method ?? "",
+          outcome,
+          fallback ? "alchemy" : (response.headers.get("x-rpc-provider") ?? ""),
+        ],
+        doubles: [1, Math.max(0, record.latencyMs), weight],
+      });
+    }
+  }
+
+  statsBuffer.requestsServed += Math.max(0, record.requestCount);
+  statsBuffer.fallbackResponses += Math.max(0, record.fallbackCount);
+  if (record.latencySampleCount > 0) {
+    statsBuffer.latencyCount += Math.max(0, record.latencySampleCount);
+    statsBuffer.latencySumMs += Math.max(0, record.latencyMs);
+    statsBuffer.latencyMaxMs = Math.max(statsBuffer.latencyMaxMs, Math.max(0, record.latencyMs));
+    const bucket = latencyBucket({ latencyMs: Math.max(0, record.latencyMs) });
+    statsBuffer.latencyBuckets[bucket] = (statsBuffer.latencyBuckets[bucket] ?? 0) + 1;
+    if (record.chainId !== undefined && record.method !== undefined) {
+      statsBuffer.samples.push({
+        chainId: record.chainId,
+        method: record.method,
+        latencyMs: Math.max(0, record.latencyMs),
+      });
+    }
+  }
+  if (record.urlResults !== undefined && record.urlResults.length > 0) {
+    statsBuffer.health.push(...record.urlResults);
+  }
+
+  scheduleCoalescedStatsFlush({ env, ctx });
+}
+
+/** Coarse response-outcome label for telemetry. */
+function rpcOutcome(status: number, fallback: boolean): string {
+  if (fallback) return "fallback";
+  if (status >= 500) return "upstream_error";
+  if (status === 429) return "rate_limited";
+  if (status === 401) return "unauthorized";
+  if (status === 404) return "not_found";
+  if (status === 403) return "forbidden";
+  if (status === 405) return "method_not_allowed";
+  if (status >= 400) return "client_error";
+  return "success";
+}
+
+/** Drains and resets the per-isolate stats buffer, returning the delta. */
+function drainStatsBuffer(): StatsDelta {
+  const delta: StatsDelta = {
+    requestsServed: statsBuffer.requestsServed,
+    fallbackResponses: statsBuffer.fallbackResponses,
+    latencySumMs: statsBuffer.latencySumMs,
+    latencyCount: statsBuffer.latencyCount,
+    latencyMaxMs: statsBuffer.latencyMaxMs,
+    latencyBuckets: { ...statsBuffer.latencyBuckets },
+    samples: statsBuffer.samples.splice(0),
+    health: statsBuffer.health.splice(0),
+  };
+  statsBuffer.requestsServed = 0;
+  statsBuffer.fallbackResponses = 0;
+  statsBuffer.latencySumMs = 0;
+  statsBuffer.latencyCount = 0;
+  statsBuffer.latencyMaxMs = 0;
+  statsBuffer.latencyBuckets = {};
+  return delta;
+}
+
+/** Debounced per-isolate flush of the coalesced stats delta to `/coalesce`. */
+function scheduleCoalescedStatsFlush({ env, ctx }: { env: Env; ctx: ExecutionContext }): void {
+  const now = Date.now();
+  if (statsFlushScheduled || now - lastStatsFlushAt < STATS_FLUSH_INTERVAL_MS) return;
+  lastStatsFlushAt = now;
+  statsFlushScheduled = true;
+  ctx.waitUntil(
+    (async () => {
+      try {
+        await flushCoalescedStats({ env });
+      } finally {
+        statsFlushScheduled = false;
+      }
+    })(),
+  );
+}
+
+async function flushCoalescedStats({ env }: { env: Env }): Promise<void> {
+  const delta = drainStatsBuffer();
+  if (
+    delta.requestsServed === 0 &&
+    delta.latencyCount === 0 &&
+    delta.samples.length === 0 &&
+    delta.health.length === 0
+  ) {
+    return;
+  }
+  try {
+    const stub = env.METRICS_DO.get(env.METRICS_DO.idFromName("global"));
+    await stub.fetch("https://metrics.internal/coalesce", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(delta),
+    });
+  } catch {
+    // Telemetry must never break request serving; a dropped stats flush is fine.
+  }
 }
 
 function defaultMetricsSnapshot(): MetricsStorageSnapshot {
@@ -2070,6 +2238,52 @@ export class MetricsDurableObject {
       }
 
       await this.state.storage.put(COUNTERS_STORAGE_KEY, counters);
+      return jsonResponse({ ok: true });
+    }
+
+    // Coalesced batch write: worker isolates send aggregated deltas (see
+    // `flushCoalescedStats`) instead of one POST per request, collapsing the
+    // number of DurableObject storage writes by the flush-granularity factor.
+    if (request.method === "POST" && url.pathname === "/coalesce") {
+      let delta: StatsDelta;
+      try {
+        delta = (await request.json()) as StatsDelta;
+      } catch {
+        return jsonResponse({ error: "Invalid stats payload" }, { status: 400 });
+      }
+
+      if (delta.health !== undefined && delta.health.length > 0) {
+        await this.recordRpcHealth({ urlResults: delta.health });
+      }
+
+      const counters = await this.readCounters();
+      counters.requestsServed += Math.max(0, Math.trunc(delta.requestsServed ?? 0));
+      counters.fallbackResponses += Math.max(0, Math.trunc(delta.fallbackResponses ?? 0));
+
+      const latencySampleCount = Math.max(0, Math.trunc(delta.latencyCount ?? 0));
+      if (latencySampleCount > 0) {
+        counters.latencyCount += latencySampleCount;
+        counters.latencySumMs += Math.max(0, delta.latencySumMs ?? 0);
+        counters.latencyMaxMs = Math.max(
+          counters.latencyMaxMs,
+          Math.max(0, delta.latencyMaxMs ?? 0),
+        );
+        for (const [bucket, value] of Object.entries(delta.latencyBuckets ?? {})) {
+          counters.latencyBuckets[bucket] =
+            (counters.latencyBuckets[bucket] ?? 0) + Math.max(0, Math.trunc(value));
+        }
+      }
+
+      await this.state.storage.put(COUNTERS_STORAGE_KEY, counters);
+
+      for (const sample of delta.samples ?? []) {
+        await this.appendLatencySample({
+          chainId: sample.chainId,
+          method: sample.method,
+          latencyMs: sample.latencyMs,
+        });
+      }
+
       return jsonResponse({ ok: true });
     }
 

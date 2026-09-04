@@ -32,6 +32,10 @@ namespace_id = "928341002"
 limit = 60
 period = 60
 
+[[analytics_engine_datasets]]
+binding = "METRICS_ANALYTICS"
+dataset = "rpc_racer_metrics"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["MetricsDurableObject"]
