@@ -85,5 +85,13 @@ Tightened:
   the remaining downstream of the metrics-DO `rowsWritten` and the biggest block
   to the ≥95% write-reduction target. Cooldown semantics (2-failure threshold,
   5-min sliding window, immediate recovery on success) are preserved.
+- **In-memory counters/samples (2026-09-04)**: `MetricsDurableObject` now keeps
+  the request counters and per-chain/method latency samples **in memory only**
+  (`liveCounters` / `liveSamples`) and no longer writes them (or their old
+  per-(chain,method) sample keys) to DO storage. `/coalesce` and `/record` only
+  mutate in-memory state; storage is touched only for provider-health and
+  block-speed, which are already transition-bounded. `/stats` reads the live
+  snapshot. Trade-off: if the `global` DO is ever evicted the rolling `/stats`
+  summary resets — acceptable for a bounded live dashboard.
 
 </invoke>

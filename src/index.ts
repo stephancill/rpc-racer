@@ -106,8 +106,6 @@ const DAY_IN_SECONDS = 86_400;
 const MAX_RANDOM_RACE_FANOUT = 5;
 const MIN_ALCHEMY_FALLBACK_TIMEOUT_MS = 5_000;
 const MAX_CHAIN_METHOD_LATENCY_SAMPLES = 1000;
-const COUNTERS_STORAGE_KEY = "counters";
-const SAMPLES_KEY_PREFIX = "samples:";
 const RPC_HEALTH_STORAGE_KEY = "rpcHealth";
 // An upstream must fail (transport, timeout, auth, or rate-limit) this many
 // consecutive times before we stop preferring it.
@@ -2032,42 +2030,6 @@ function defaultCounters(): MetricsCounters {
   };
 }
 
-function normalizeCounters({ counters }: { counters: Partial<MetricsCounters> }): MetricsCounters {
-  const defaults = defaultCounters();
-  return {
-    requestsServed: Math.max(0, Math.trunc(counters.requestsServed ?? 0)),
-    fallbackResponses: Math.max(0, Math.trunc(counters.fallbackResponses ?? 0)),
-    latencySumMs: Math.max(0, counters.latencySumMs ?? 0),
-    latencyCount: Math.max(0, Math.trunc(counters.latencyCount ?? 0)),
-    latencyMaxMs: Math.max(0, counters.latencyMaxMs ?? 0),
-    latencyBuckets: {
-      ...defaults.latencyBuckets,
-      ...counters.latencyBuckets,
-    },
-  };
-}
-
-function samplesStorageKey({ chainId, method }: { chainId: number; method: string }): string {
-  return `${SAMPLES_KEY_PREFIX}${chainId}:${method}`;
-}
-
-function parseSamplesStorageKey({
-  key,
-}: {
-  key: string;
-}): { chainId: string; method: string } | null {
-  const raw = key.slice(SAMPLES_KEY_PREFIX.length);
-  const separatorIndex = raw.indexOf(":");
-  if (separatorIndex === -1) {
-    return null;
-  }
-
-  return {
-    chainId: raw.slice(0, separatorIndex),
-    method: raw.slice(separatorIndex + 1),
-  };
-}
-
 export function buildChainMethodLatencyStats({
   samples,
 }: {
@@ -2151,6 +2113,12 @@ function jsonResponse(body: unknown, init?: ResponseInit): Response {
 
 export class MetricsDurableObject {
   private readonly state: DurableObjectState;
+  // Live (in-memory) counters + latency samples. Kept in memory so a coalesce
+  // only writes to storage for provider-health (and block-speed) state, not for
+  // the rolling metrics that `/stats` reads. Resets naturally if the DO is ever
+  // evicted, which is acceptable for a bounded live dashboard.
+  private liveCounters: MetricsCounters | null = null;
+  private liveSamples: ChainMethodLatencySamples = {};
 
   constructor(state: DurableObjectState) {
     this.state = state;
@@ -2245,7 +2213,6 @@ export class MetricsDurableObject {
         }
       }
 
-      await this.state.storage.put(COUNTERS_STORAGE_KEY, counters);
       return jsonResponse({ ok: true });
     }
 
@@ -2282,8 +2249,6 @@ export class MetricsDurableObject {
         }
       }
 
-      await this.state.storage.put(COUNTERS_STORAGE_KEY, counters);
-
       for (const sample of delta.samples ?? []) {
         await this.appendLatencySample({
           chainId: sample.chainId,
@@ -2299,41 +2264,15 @@ export class MetricsDurableObject {
   }
 
   private async readSnapshot(): Promise<MetricsStorageSnapshot> {
-    await this.migrateLegacySnapshot();
     const counters = await this.readCounters();
-    const chainMethodLatencySamples = await this.readChainMethodLatencySamples();
-    return { ...counters, chainMethodLatencySamples };
-  }
-
-  private async migrateLegacySnapshot(): Promise<void> {
-    const legacy = await this.state.storage.get<MetricsStorageSnapshot>("snapshot");
-    if (legacy === undefined) {
-      return;
-    }
-
-    await this.state.storage.put(COUNTERS_STORAGE_KEY, normalizeCounters({ counters: legacy }));
-
-    for (const [chainId, methods] of Object.entries(legacy.chainMethodLatencySamples ?? {})) {
-      for (const [method, samples] of Object.entries(methods)) {
-        await this.state.storage.put(
-          samplesStorageKey({ chainId: Number.parseInt(chainId, 10), method }),
-          samples,
-        );
-      }
-    }
-
-    await this.state.storage.delete("snapshot");
+    return { ...counters, chainMethodLatencySamples: this.liveSamples };
   }
 
   private async readCounters(): Promise<MetricsCounters> {
-    const stored = await this.state.storage.get<Partial<MetricsCounters>>(COUNTERS_STORAGE_KEY);
-    if (stored !== undefined) {
-      return normalizeCounters({ counters: stored });
+    if (this.liveCounters === null) {
+      this.liveCounters = defaultCounters();
     }
-
-    const initial = defaultCounters();
-    await this.state.storage.put(COUNTERS_STORAGE_KEY, initial);
-    return initial;
+    return this.liveCounters;
   }
 
   private async readRpcHealth(): Promise<RpcHealthMap> {
@@ -2411,20 +2350,6 @@ export class MetricsDurableObject {
     await this.state.storage.put(RPC_HEALTH_STORAGE_KEY, snapshot);
   }
 
-  private async readChainMethodLatencySamples(): Promise<ChainMethodLatencySamples> {
-    const samples: ChainMethodLatencySamples = {};
-    const entries = await this.state.storage.list<number[]>({ prefix: SAMPLES_KEY_PREFIX });
-    for (const [key, values] of entries) {
-      const parsed = parseSamplesStorageKey({ key });
-      if (parsed === null) {
-        continue;
-      }
-      samples[parsed.chainId] ??= {};
-      samples[parsed.chainId][parsed.method] = values;
-    }
-    return samples;
-  }
-
   private async appendLatencySample({
     chainId,
     method,
@@ -2434,13 +2359,11 @@ export class MetricsDurableObject {
     method: string;
     latencyMs: number;
   }): Promise<void> {
-    const key = samplesStorageKey({ chainId, method });
-    const existing = await this.state.storage.get<number[]>(key);
-    const samples = existing ?? [];
-    samples.push(Math.max(0, latencyMs));
-    if (samples.length > MAX_CHAIN_METHOD_LATENCY_SAMPLES) {
-      samples.splice(0, samples.length - MAX_CHAIN_METHOD_LATENCY_SAMPLES);
+    const samples = (this.liveSamples[String(chainId)] ??= {});
+    const list = (samples[method] ??= []);
+    list.push(Math.max(0, latencyMs));
+    if (list.length > MAX_CHAIN_METHOD_LATENCY_SAMPLES) {
+      list.splice(0, list.length - MAX_CHAIN_METHOD_LATENCY_SAMPLES);
     }
-    await this.state.storage.put(key, samples);
   }
 }
