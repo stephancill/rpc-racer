@@ -3,6 +3,48 @@
 Working notes for the `rpc-racer` Cloudflare Worker. Any implementation change
 should be reflected here before committing.
 
+## 2026-09-05 — Make `/stats` durable by reading from Workers Analytics Engine
+
+Root cause of the previous `/stats` undercount: the request counters lived only in
+the `MetricsDurableObject`'s in-memory `liveCounters`, so they reset to zero every
+time the `global` DO was evicted/recycled (every deploy + runtime churn), showing
+only requests-since-last-reset. A durable source already existed — the Workers
+Analytics Engine dataset (`rpc_racer_metrics`) — which persists across deploys.
+
+### What changed
+
+- **`/stats` now pulls from Analytics Engine** for its headline metrics over a
+  rolling window (default 30 days, `STATS_WINDOW_DAYS`):
+  `requestsServed`, `publicRequests`, `internalRequests`, `fallbackResponses`,
+  `averageLatencyMs`, `latencyMaxMs`, `latencyBuckets`. The response carries an
+  explicit disclaimer: window bounds (`windowStart`/`windowEnd`) plus a `note`
+  clarifying the totals are for the rolling window, not the service's lifetime.
+- Aggregation is a **single Analytics read query** (`POST /analytics_engine/sql`),
+  reconstructed for true counts/latency by multiplying each row's telemetry sample
+  weight (`double3`, =10 for the 10%-sampled successes, 1 for failures/429/fallback)
+  by Analytics Engine's `_sample_interval` (adaptive read/write sampling).
+- **Fallback**: if `CF_ACCOUNT_ID`/`ANALYTICS_TOKEN` aren't configured or the read
+  fails, `/stats` degrades to the legacy in-memory DO snapshot (so it keeps working
+  before the token is set).
+- **Config**: `CF_ACCOUNT_ID` is a var in `wrangler.toml`; `ANALYTICS_TOKEN`
+  (permission *Account Analytics → Read*) must be set with
+  `wrangler secret put ANALYTICS_TOKEN`. Without it `/stats` uses the fallback.
+- **Caching**: per-isolate 60s TTL to bound Analytics read query usage (each read
+  query counts against the Analytics Engine quote).
+
+### Behavior / breaking change
+
+- The per-chain/per-method latency breakdown (`chainMethodLatencies`) was dropped
+  (headline metrics only). README updated. Consumers of the old `/stats` shape
+  should switch to the new fields.
+
+### Verified
+
+- `bun run lint`, `bunx oxfmt --write` pass; `bunx tsc --noEmit` shows only the two
+  pre-existing `CacheStorage.default` errors.
+- The exact aggregation SQL was exercised against the live
+  `rpc_racer_metrics` dataset with a read token.
+
 ## 2026-09-04 — Migrate per-request metrics to Analytics Engine + coalesced DO writes
 
 Approved under `address-notifications/docs/handover.md → Approved cost-reduction

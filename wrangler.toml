@@ -44,3 +44,7 @@ new_sqlite_classes = ["MetricsDurableObject"]
 CHAINLIST_RPCS_URL = "https://chainlist.org/rpcs.json"
 ALCHEMY_NETWORK_CONFIG_URL = "https://app-api.alchemy.com/trpc/config.getNetworkConfig"
 DEFAULT_TIMEOUT_MS = "2000"
+# Cloudflare account ID used by `/stats` to query Analytics Engine. The read
+# token itself is stored as the `ANALYTICS_TOKEN` secret (Account Analytics: Read).
+CF_ACCOUNT_ID = "2e6717908caccc8ef5eebae01beea4aa"
+STATS_WINDOW_DAYS = "30"

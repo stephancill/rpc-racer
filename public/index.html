@@ -5,17 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" type="image/x-icon" href="/favicon.ico" />
     <title>evm.stupidtech.net</title>
-    <style>
-      table {
-        border-collapse: collapse;
-      }
-
-      th,
-      td {
-        border: 1px solid currentcolor;
-        padding: 0.25rem 0.5rem;
-      }
-    </style>
   </head>
   <body>
     <h1>evm.stupidtech.net</h1>
@@ -57,27 +46,6 @@
     </ul>
 
     <details>
-      <summary>Latency by chain and method</summary>
-      <p>Average and median latency from the last 1000 requests for each method on each chain.</p>
-      <table>
-        <thead>
-          <tr>
-            <th scope="col">Chain</th>
-            <th scope="col">Method</th>
-            <th scope="col">Average</th>
-            <th scope="col">Median</th>
-          </tr>
-        </thead>
-        <tbody id="chain-method-latencies">
-          <tr>
-            <td colspan="4">No latency samples yet.</td>
-          </tr>
-        </tbody>
-      </table>
-      <p>* N &lt; 50</p>
-    </details>
-
-    <details>
       <summary>How it works</summary>
       <p>
         When you send a JSON-RPC request, we race 5 random public HTTPS RPC endpoints and return the
@@ -106,72 +74,8 @@
         return `${value.toFixed(2)}ms`;
       }
 
-      async function loadChainNameById() {
-        const response = await fetch("/v1/chains", {
-          headers: {
-            accept: "application/json",
-          },
-        });
-
-        if (!response.ok) {
-          return new Map();
-        }
-
-        const payload = await response.json();
-        return new Map((payload?.chains ?? []).map((chain) => [chain.chainId, chain.name]));
-      }
-
-      function renderChainMethodLatencies(chainMethodLatencies, chainNameById) {
-        const tbody = document.getElementById("chain-method-latencies");
-        tbody.textContent = "";
-
-        const rows = [];
-        for (const chain of chainMethodLatencies ?? []) {
-          for (const method of chain.methods ?? []) {
-            rows.push({
-              chainId: chain.chainId,
-              chainName: chainNameById.get(chain.chainId) ?? chain.chainId.toLocaleString("en-US"),
-              method: method.method,
-              sampleCount: method.sampleCount,
-              averageLatencyMs: method.averageLatencyMs,
-              medianLatencyMs: method.medianLatencyMs,
-            });
-          }
-        }
-
-        if (rows.length === 0) {
-          const row = document.createElement("tr");
-          const cell = document.createElement("td");
-          cell.colSpan = 4;
-          cell.textContent = "No latency samples yet.";
-          row.append(cell);
-          tbody.append(row);
-          return;
-        }
-
-        for (const latency of rows) {
-          const row = document.createElement("tr");
-          const methodName = latency.sampleCount < 50 ? `${latency.method} *` : latency.method;
-          const values = [
-            latency.chainName,
-            methodName,
-            formatLatency(latency.averageLatencyMs),
-            formatLatency(latency.medianLatencyMs),
-          ];
-
-          for (const value of values) {
-            const cell = document.createElement("td");
-            cell.textContent = value;
-            row.append(cell);
-          }
-
-          tbody.append(row);
-        }
-      }
-
       async function loadStats() {
         try {
-          const chainNameById = await loadChainNameById();
           const response = await fetch("/stats", {
             headers: {
               accept: "application/json",
@@ -194,8 +98,6 @@
               metrics.averageLatencyMs,
             );
           }
-
-          renderChainMethodLatencies(metrics?.chainMethodLatencies, chainNameById);
         } catch {
           // Ignore stats refresh failures.
         }

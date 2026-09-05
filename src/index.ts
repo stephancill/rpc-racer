@@ -6,6 +6,12 @@ type Env = {
   DEFAULT_TIMEOUT_MS?: string;
   ALCHEMY_API_KEY?: string;
   INTERNAL_SECRET?: string;
+  /** Cloudflare account ID used to query the Workers Analytics Engine SQL API. */
+  CF_ACCOUNT_ID?: string;
+  /** Secret API token (Account Analytics: Read) for the Analytics Engine SQL API. */
+  ANALYTICS_TOKEN?: string;
+  /** Rolling window in days that `/stats` aggregates from Analytics Engine. Default 30. */
+  STATS_WINDOW_DAYS?: string;
   METRICS_DO: DurableObjectNamespace;
   /** Workers Analytics Engine dataset for rpc-racer request telemetry. */
   METRICS_ANALYTICS?: AnalyticsEngineDataset;
@@ -85,6 +91,27 @@ type RpcMetricsRecord = {
   urlResults?: RpcAttemptHealth[];
 };
 
+// Durable `/stats` snapshot aggregated from Workers Analytics Engine over a
+// rolling window. Covers the headline metrics only (no per-chain/method latency
+// breakdown), and is not reset by Durable Object evictions.
+type AnalyticsMetricsSnapshot = {
+  source: "analytics";
+  windowDays: number;
+  /** ISO start of the rolling aggregation window (inclusive). */
+  windowStart: string;
+  /** ISO end of the rolling aggregation window. */
+  windowEnd: string;
+  /** Human-readable disclaimer that totals cover the rolling window, not lifetime. */
+  note: string;
+  requestsServed: number;
+  publicRequests: number;
+  internalRequests: number;
+  fallbackResponses: number;
+  averageLatencyMs: number;
+  latencyMaxMs: number;
+  latencyBuckets: Record<string, number>;
+};
+
 // Per-upstream outcome observed for a single request. `degraded` means the
 // endpoint looked unresponsive (transport failure, timeout, or an auth /
 // rate-limit provider error) rather than a genuine node-level RPC error.
@@ -153,6 +180,14 @@ const MAX_LATENCY_SAMPLES_PER_METHOD_PER_WINDOW = 100;
 // sample rate (10%); errors, rate-limit and fallback responses are always
 // recorded. Consumers must scale analytics totals by this inverse factor.
 const SUCCESS_SAMPLE_RATE = 0.1;
+// Default rolling window (days) that `/stats` aggregates from Analytics Engine.
+const ANALYTICS_STATS_WINDOW_DAYS = 30;
+// How long a worker isolate caches the analytics-derived `/stats` result before
+// re-querying the Analytics Engine SQL API. Analytics reads are billed per query,
+// and /stats is not latency-critical, so a short TTL is plenty.
+const ANALYTICS_STATS_CACHE_MS = 60_000;
+// Base URL when querying the Workers Analytics Engine SQL API from the Worker.
+const ANALYTICS_SQL_API_BASE_URL = "https://api.cloudflare.com/client/v4/accounts";
 
 type PendingLatencySample = { chainId: number; method: string; latencyMs: number };
 
@@ -229,6 +264,8 @@ const alchemyNetworkConfigSchema = z.object({
   }),
 });
 
+let analyticsStatsMemoryCache: { expiresAt: number; snapshot: AnalyticsMetricsSnapshot } | null =
+  null;
 let chainMemoryCache: { expiresAt: number; registry: ChainRegistry } | null = null;
 let alchemyMemoryCache: { expiresAt: number; slugByChainId: Map<number, string> } | null = null;
 let rpcHealthMemoryCache: { expiresAt: number; blocked: Set<string> } | null = null;
@@ -1759,11 +1796,137 @@ async function mapWithConcurrency<T, R>({
   return outputs.flat();
 }
 
-async function getRpcMetricsSnapshot({ env }: { env: Env }): Promise<
-  RpcMetricsSnapshot & {
-    averageLatencyMs: number;
+function analyticsStatsWindowDays({ env }: { env: Env }): number {
+  const raw = env.STATS_WINDOW_DAYS?.trim();
+  if (raw === undefined || raw.length === 0) {
+    return ANALYTICS_STATS_WINDOW_DAYS;
   }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return ANALYTICS_STATS_WINDOW_DAYS;
+  }
+  return parsed;
+}
+
+function buildAnalyticsStatsQuery({ windowDays }: { windowDays: number }): string {
+  // `double3` is the telemetry sample weight (10 for the 10%-sampled successes,
+  // 1 for always-written failures/rate-limits/fallbacks) and `_sample_interval`
+  // is Analytics Engine's own read/write sampling. Multiplying by the two
+  // produces true request counts and latency over the window.
+  return `
+    SELECT
+      sum(double3 * _sample_interval) AS requestsServed,
+      sumIf(double3 * _sample_interval, blob1 = 'public') AS publicRequests,
+      sumIf(double3 * _sample_interval, blob1 = 'internal') AS internalRequests,
+      sumIf(double3 * _sample_interval, blob4 = 'fallback') AS fallbackResponses,
+      max(double2) AS latencyMaxMs,
+      sum(double3 * _sample_interval * double2) / sum(double3 * _sample_interval)
+        AS averageLatencyMs,
+      sumIf(double3 * _sample_interval, double2 < 100) AS b0,
+      sumIf(double3 * _sample_interval, double2 >= 100 AND double2 < 250) AS b250,
+      sumIf(double3 * _sample_interval, double2 >= 250 AND double2 < 500) AS b500,
+      sumIf(double3 * _sample_interval, double2 >= 500 AND double2 < 1000) AS b1000,
+      sumIf(double3 * _sample_interval, double2 >= 1000 AND double2 < 2000) AS b2000,
+      sumIf(double3 * _sample_interval, double2 >= 2000) AS b2000plus
+    FROM rpc_racer_metrics
+    WHERE timestamp > now() - INTERVAL '${windowDays}' DAY`;
+}
+
+function roundToLong(value: number): number {
+  return Math.max(0, Math.trunc(Number.isFinite(value) ? value : 0));
+}
+
+function roundMillis(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+
+// Builds the durable `/stats` snapshot from Workers Analytics Engine. Returns
+// null when credentials aren't configured or the query fails, so callers can fall
+// back to the in-memory Durable Object snapshot.
+async function tryGetAnalyticsStatsSnapshot({
+  env,
+}: {
+  env: Env;
+}): Promise<AnalyticsMetricsSnapshot | null> {
+  const accountId = env.CF_ACCOUNT_ID?.trim();
+  const token = env.ANALYTICS_TOKEN?.trim();
+  if (
+    accountId === undefined ||
+    accountId.length === 0 ||
+    token === undefined ||
+    token.length === 0
+  ) {
+    return null;
+  }
+
+  const now = Date.now();
+  if (analyticsStatsMemoryCache !== null && now < analyticsStatsMemoryCache.expiresAt) {
+    return analyticsStatsMemoryCache.snapshot;
+  }
+
+  const windowDays = analyticsStatsWindowDays({ env });
+  try {
+    const response = await fetch(
+      `${ANALYTICS_SQL_API_BASE_URL}/${encodeURIComponent(accountId)}/analytics_engine/sql`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+        body: buildAnalyticsStatsQuery({ windowDays }),
+      },
+    );
+    if (!response.ok) {
+      return null;
+    }
+    const payload = (await response.json()) as {
+      data?: Array<Record<string, number>>;
+    };
+    const row = payload.data?.[0];
+    if (row === undefined) {
+      return null;
+    }
+
+    const snapshot: AnalyticsMetricsSnapshot = {
+      source: "analytics",
+      windowDays,
+      windowStart: new Date(now - windowDays * DAY_IN_SECONDS * 1000).toISOString(),
+      windowEnd: new Date(now).toISOString(),
+      note: `Cumulative totals cover the rolling ${windowDays}-day window, not the service's lifetime.`,
+      requestsServed: roundToLong(row.requestsServed),
+      publicRequests: roundToLong(row.publicRequests),
+      internalRequests: roundToLong(row.internalRequests),
+      fallbackResponses: roundToLong(row.fallbackResponses),
+      averageLatencyMs: roundMillis(row.averageLatencyMs),
+      latencyMaxMs: roundMillis(row.latencyMaxMs),
+      latencyBuckets: {
+        "0-100": roundToLong(row.b0),
+        "100-250": roundToLong(row.b250),
+        "250-500": roundToLong(row.b500),
+        "500-1000": roundToLong(row.b1000),
+        "1000-2000": roundToLong(row.b2000),
+        "2000+": roundToLong(row.b2000plus),
+      },
+    };
+
+    analyticsStatsMemoryCache = { expiresAt: now + ANALYTICS_STATS_CACHE_MS, snapshot };
+    return snapshot;
+  } catch {
+    return null;
+  }
+}
+
+async function getRpcMetricsSnapshot({ env }: { env: Env }): Promise<
+  | AnalyticsMetricsSnapshot
+  | (RpcMetricsSnapshot & {
+      averageLatencyMs: number;
+    })
 > {
+  const analytics = await tryGetAnalyticsStatsSnapshot({ env });
+  if (analytics !== null) {
+    return analytics;
+  }
+
   try {
     const stub = env.METRICS_DO.get(env.METRICS_DO.idFromName("global"));
     const response = await stub.fetch("https://metrics.internal/snapshot");

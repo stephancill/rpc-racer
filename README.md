@@ -16,7 +16,19 @@ Production base URL: `https://evm.stupidtech.net`
   - Basic service metadata and route map.
 
 - `GET /stats`
-  - Returns service metrics as JSON, including average and median latency for the last 1000 requests per method per chain.
+  - Returns service metrics aggregated from **Workers Analytics Engine** over a
+    rolling window (default `30` days, configurable via `STATS_WINDOW_DAYS`).
+    Because the source is Analytics Engine, the counters are **durable** — they do
+    not reset when the metrics Durable Object is evicted/recycled.
+  - Fields: `source`, `windowDays`, `windowStart`, `windowEnd`, `note`,
+    `requestsServed`, `publicRequests`, `internalRequests`, `fallbackResponses`,
+    `averageLatencyMs`, `latencyMaxMs`, and `latencyBuckets`. Request
+    totals/latency are reconstructed from Analytics Engine's adaptive sampling;
+    the rolling window bounds the history (see `note`).
+  - Requires `CF_ACCOUNT_ID` (var) and `ANALYTICS_TOKEN` (secret,
+    Account Analytics: Read). If the token isn't configured or the query fails,
+    `/stats` falls back to the legacy in-memory Durable Object snapshot.
+  - Results are cached per isolate for ~60s to limit Analytics read queries.
 
 - `POST /v1/:chain`
   - Proxies one JSON-RPC request.
