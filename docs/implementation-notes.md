@@ -3,6 +3,28 @@
 Working notes for the `rpc-racer` Cloudflare Worker. Any implementation change
 should be reflected here before committing.
 
+## 2026-09-07 — Expose `nativeCurrency` on `/v1/chains` and `/v1/chains/:chainId`
+
+The two chain-listing endpoints now surface each chain's native currency so
+clients can render gas/token labels without a second lookup.
+
+### What changed
+
+- Added a `NativeCurrency` type (`name`, `symbol`, `decimals`) to
+  `src/index.ts`.
+- The Chainlist source already carries `nativeCurrency` and the parse schema is
+  `passthrough()`, so the field is preserved. It is normalized onto
+  `NormalizedChain.nativeCurrency` and included in both `GET /v1/chains`
+  (including the collapsed `rpcUrlCount` form) and `GET /v1/chains/:chainId`
+  (which spreads the full chain entry). The `/v1/chains` `includeRpcUrls` branch
+  inherits it via the existing spread.
+- README updated.
+
+### Behavior
+
+- Non-breaking addition: the field appears only when present in the source data
+  (verified: all 2909 current Chainlist chains carry it).
+
 ## 2026-09-05 — Make `/stats` durable by reading from Workers Analytics Engine
 
 Root cause of the previous `/stats` undercount: the request counters lived only in
