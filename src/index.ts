@@ -33,6 +33,7 @@ type ChainEntry = {
   chainSlug?: string;
   isTestnet?: boolean;
   nativeCurrency?: NativeCurrency;
+  explorers?: ChainExplorer[];
   rpc: Array<RpcEntry | string>;
 };
 
@@ -42,6 +43,13 @@ type NativeCurrency = {
   decimals: number;
 };
 
+type ChainExplorer = {
+  name: string;
+  url: string;
+  standard?: string;
+  icon?: string;
+};
+
 type NormalizedChain = {
   chainId: number;
   name: string;
@@ -49,6 +57,7 @@ type NormalizedChain = {
   chainSlug?: string;
   isTestnet: boolean;
   nativeCurrency?: NativeCurrency;
+  explorers?: ChainExplorer[];
   aliases: string[];
   rpcUrls: string[];
 };
@@ -441,6 +450,7 @@ async function handleListChains({
       chainSlug: chain.chainSlug,
       isTestnet: chain.isTestnet,
       nativeCurrency: chain.nativeCurrency,
+      explorers: chain.explorers,
       aliases: chain.aliases,
       rpcUrlCount: chain.rpcUrls.length,
       ...(blockSpeedMs !== undefined && { blockSpeedMs }),
@@ -1092,6 +1102,7 @@ async function getChainRegistry({ env }: { env: Env }): Promise<ChainRegistry> {
       shortName: chain.shortName,
       isTestnet: Boolean(chain.isTestnet),
       nativeCurrency: chain.nativeCurrency,
+      explorers: chain.explorers,
       aliases: buildChainAliases({ chain }),
       rpcUrls,
     };

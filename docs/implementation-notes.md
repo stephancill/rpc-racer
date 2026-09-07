@@ -3,27 +3,26 @@
 Working notes for the `rpc-racer` Cloudflare Worker. Any implementation change
 should be reflected here before committing.
 
-## 2026-09-07 — Expose `nativeCurrency` on `/v1/chains` and `/v1/chains/:chainId`
+## 2026-09-07 — Expose `nativeCurrency` and `explorers` on chain endpoints
 
-The two chain-listing endpoints now surface each chain's native currency so
-clients can render gas/token labels without a second lookup.
+The chain-listing endpoints now surface each chain's native currency and block
+explorers so clients can render gas/token labels and explorer links without a
+second lookup.
 
 ### What changed
 
-- Added a `NativeCurrency` type (`name`, `symbol`, `decimals`) to
-  `src/index.ts`.
-- The Chainlist source already carries `nativeCurrency` and the parse schema is
-  `passthrough()`, so the field is preserved. It is normalized onto
-  `NormalizedChain.nativeCurrency` and included in both `GET /v1/chains`
-  (including the collapsed `rpcUrlCount` form) and `GET /v1/chains/:chainId`
-  (which spreads the full chain entry). The `/v1/chains` `includeRpcUrls` branch
-  inherits it via the existing spread.
+- Added `NativeCurrency` (`name`, `symbol`, `decimals`) and `ChainExplorer`
+  (`name`, `url`, `standard?`, `icon?`) types to `src/index.ts`.
+- The Chainlist source already carries `nativeCurrency` and `explorers`, and the
+  parse schema is `passthrough()`, so the fields are preserved. Both are
+  normalized onto `NormalizedChain` and included in `GET /v1/chains` (including
+  the collapsed `rpcUrlCount` form) and `GET /v1/chains/:chainId`.
 - README updated.
 
 ### Behavior
 
-- Non-breaking addition: the field appears only when present in the source data
-  (verified: all 2909 current Chainlist chains carry it).
+- Non-breaking addition: each field appears only when present in the source data
+  (verified: `nativeCurrency` on all 2909 chains; `explorers` on 2520).
 
 ## 2026-09-05 — Make `/stats` durable by reading from Workers Analytics Engine
 
@@ -49,7 +48,7 @@ Analytics Engine dataset (`rpc_racer_metrics`) — which persists across deploys
   fails, `/stats` degrades to the legacy in-memory DO snapshot (so it keeps working
   before the token is set).
 - **Config**: `CF_ACCOUNT_ID` is a var in `wrangler.toml`; `ANALYTICS_TOKEN`
-  (permission *Account Analytics → Read*) must be set with
+  (permission _Account Analytics → Read_) must be set with
   `wrangler secret put ANALYTICS_TOKEN`. Without it `/stats` uses the fallback.
 - **Caching**: per-isolate 60s TTL to bound Analytics read query usage (each read
   query counts against the Analytics Engine quote).

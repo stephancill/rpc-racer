@@ -58,10 +58,12 @@ Production base URL: `https://evm.stupidtech.net`
     - `includeRpcUrls` (optional, any present value includes full `rpcUrls` arrays)
   - Each entry may include `blockSpeedMs`, the estimated average time between blocks in milliseconds. Values are computed lazily (only for chains that don't yet have one) during refreshes, so the field appears once a chain has been sampled.
   - Each entry includes `nativeCurrency` (when present in the source data), an object with `name`, `symbol`, and `decimals` describing the chain's native token.
+  - Each entry includes `explorers` (when present in the source data), an array of `{ name, url, standard, icon? }` for the chain's block explorers.
 
 - `GET /v1/chains/:chainId`
   - Returns one chain entry by numeric chain ID. Includes `blockSpeedMs` when available.
   - Includes `nativeCurrency` (when present in the source data).
+  - Includes `explorers` (when present in the source data).
 
 ## Block Speed
 
