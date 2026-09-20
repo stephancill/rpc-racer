@@ -3,6 +3,33 @@
 Working notes for the `rpc-racer` Cloudflare Worker. Any implementation change
 should be reflected here before committing.
 
+## 2026-09-20 — Restyle the landing page to match the Stupid web style
+
+The root landing page (`public/index.html`) was the last Stupid product page not
+using the shared Stupid web style.
+
+### What changed
+
+- Added the shared inline stylesheet (system-ui, `46rem` centered column, `#f4f4f4`
+  code/pre blocks), matching `explorers.stupidtech.net` and `stupidtech.net`.
+- Added `meta name="description"`, full Open Graph tags (`og:title`,
+  `og:description`, `og:type`, `og:url`, `og:image`) and `twitter:card` so link
+  previews are populated; `og:image` points at
+  `https://stupidtech.net/apple-touch-icon.png` until a product `og.png` exists.
+- Replaced the collapsible `<details>` "How it works" block with a plain `<h2>`
+  section; Stupid pages use flat semantic headings rather than disclosure widgets.
+- Dropped the unused `canvas` rule from the shared CSS since the page has no canvas.
+
+### Behavior
+
+- Presentation only. Endpoints, response shapes, the `/stats` fetch, and the
+  footer links are unchanged.
+
+### Verified
+
+- `bunx oxfmt --write public/index.html` passes.
+- `bun run dev` serves the updated page at `http://localhost:8787/` (`200`).
+
 ## 2026-09-07 — Expose `nativeCurrency` and `explorers` on chain endpoints
 
 The chain-listing endpoints now surface each chain's native currency and block

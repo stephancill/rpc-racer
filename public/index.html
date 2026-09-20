@@ -3,8 +3,40 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
     <title>evm.stupidtech.net</title>
+    <meta
+      name="description"
+      content="A fast and reliable public EVM RPC that races public providers."
+    />
+    <meta property="og:title" content="evm.stupidtech.net" />
+    <meta
+      property="og:description"
+      content="A fast and reliable public EVM RPC that races public providers."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://evm.stupidtech.net" />
+    <meta property="og:image" content="https://stupidtech.net/apple-touch-icon.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 46rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.6;
+      }
+      code,
+      pre {
+        background: #f4f4f4;
+        padding: 0.15rem 0.35rem;
+        border-radius: 4px;
+      }
+      pre {
+        padding: 1rem;
+        overflow: auto;
+      }
+    </style>
   </head>
   <body>
     <h1>evm.stupidtech.net</h1>
@@ -45,21 +77,19 @@
       <li><strong>Average latency:</strong> <span id="average-latency-ms">-</span></li>
     </ul>
 
-    <details>
-      <summary>How it works</summary>
-      <p>
-        When you send a JSON-RPC request, we race 5 random public HTTPS RPC endpoints and return the
-        first successful response.
-      </p>
-      <p>
-        Chain metadata is cached from
-        <a href="https://chainlist.org" target="_blank" rel="noopener">Chainlist</a>.
-      </p>
-      <p>
-        The winning provider is exposed via response headers:
-        <code>x-rpc-provider</code>, <code>x-rpc-upstream</code>, and <code>x-rpc-chain-id</code>.
-      </p>
-    </details>
+    <h2>How it works</h2>
+    <p>
+      When you send a JSON-RPC request, we race 5 random public HTTPS RPC endpoints and return the
+      first successful response.
+    </p>
+    <p>
+      Chain metadata is cached from
+      <a href="https://chainlist.org" target="_blank" rel="noopener">Chainlist</a>.
+    </p>
+    <p>
+      The winning provider is exposed via response headers:
+      <code>x-rpc-provider</code>, <code>x-rpc-upstream</code>, and <code>x-rpc-chain-id</code>.
+    </p>
 
     <p>
       <a href="https://github.com/stephancill/rpc-racer">github</a>
