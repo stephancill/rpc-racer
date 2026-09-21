@@ -3,6 +3,29 @@
 Working notes for the `rpc-racer` Cloudflare Worker. Any implementation change
 should be reflected here before committing.
 
+## 2026-09-21 — Expose chain icon URLs
+
+- Added optional `iconUrl` to normalized chain metadata and both
+  `GET /v1/chains` variants (with or without `includeRpcUrls`) and
+  `GET /v1/chains/:chainId`.
+- Derive the URL from ChainList's non-empty `chainSlug` using
+  `https://icons.llamao.fi/icons/chains/rsz_{chainSlug}.jpg`, matching its frontend.
+  Slugs are URL-encoded to support names containing spaces or special characters.
+- Validate the optional source `chainSlug` as a string. Chains without a slug
+  omit `iconUrl`; no extra upstream requests are needed to generate the URLs.
+- Documented the new field in the README.
+
+### Verified
+
+- `bun run format` and `bun run lint` pass.
+- Local endpoint checks return icons for 304 of 2,933 chains in both listing
+  variants. Single-chain responses include the Ethereum icon and omit the field
+  for Expanse (no slug); X Layer's space is correctly encoded as `%20`.
+- All checked endpoints returned `200`. Background block-speed sampling logged
+  RPC timeouts and local runtime errors during the smoke check.
+- `bunx tsc --noEmit` reports only the two previously documented
+  `CacheStorage.default` type errors.
+
 ## 2026-09-20 — Restyle the landing page to match the Stupid web style
 
 The root landing page (`public/index.html`) was the last Stupid product page not

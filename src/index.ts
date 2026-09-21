@@ -55,6 +55,7 @@ type NormalizedChain = {
   name: string;
   shortName?: string;
   chainSlug?: string;
+  iconUrl?: string;
   isTestnet: boolean;
   nativeCurrency?: NativeCurrency;
   explorers?: ChainExplorer[];
@@ -262,6 +263,7 @@ const chainsArraySchema = z.array(
       chainId: z.number(),
       name: z.string(),
       shortName: z.string().optional(),
+      chainSlug: z.string().optional(),
       rpc: z.array(z.union([z.string(), z.object({ url: z.string() }).passthrough()])),
     })
     .passthrough(),
@@ -448,6 +450,7 @@ async function handleListChains({
       name: chain.name,
       shortName: chain.shortName,
       chainSlug: chain.chainSlug,
+      iconUrl: chain.iconUrl,
       isTestnet: chain.isTestnet,
       nativeCurrency: chain.nativeCurrency,
       explorers: chain.explorers,
@@ -1099,6 +1102,9 @@ async function getChainRegistry({ env }: { env: Env }): Promise<ChainRegistry> {
       chainId: chain.chainId,
       name: chain.name,
       chainSlug: chain.chainSlug,
+      iconUrl: chain.chainSlug
+        ? `https://icons.llamao.fi/icons/chains/rsz_${encodeURIComponent(chain.chainSlug)}.jpg`
+        : undefined,
       shortName: chain.shortName,
       isTestnet: Boolean(chain.isTestnet),
       nativeCurrency: chain.nativeCurrency,
