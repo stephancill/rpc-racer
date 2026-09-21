@@ -132,7 +132,7 @@ type AnalyticsMetricsSnapshot = {
 
 // Per-upstream outcome observed for a single request. `degraded` means the
 // endpoint looked unresponsive (transport failure, timeout, or an auth /
-// rate-limit provider error) rather than a genuine node-level RPC error.
+// rate-limit / server error) rather than a genuine node-level RPC error.
 type RpcAttemptHealth = {
   url: string;
   degraded: boolean;
@@ -858,7 +858,7 @@ async function tryAlchemyFallback({
   }
 }
 
-async function raceRequests({
+export async function raceRequests({
   candidateUrls,
   requestBody,
   timeoutMs,
@@ -902,13 +902,26 @@ async function raceRequests({
       }
 
       const hasJsonRpcError = isJsonRpcError({ value: parsed });
+      // A failed HTTP response is never a successful RPC result. Some providers
+      // put their error under `result`; treat that as a transport failure so the
+      // race continues, health degrades, and Alchemy can be tried if needed.
+      // Keep genuine JSON-RPC errors available for the existing passthrough path.
+      if (!response.ok && !hasJsonRpcError) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
       return {
         url,
         body,
         status: response.status,
         hasJsonRpcError,
         likelyStateIssueError: isLikelyStateIssueError({ value: parsed }),
-        degraded: hasJsonRpcError && isDegradedRpcError({ value: parsed }),
+        degraded:
+          response.status >= 500 ||
+          response.status === 401 ||
+          response.status === 403 ||
+          response.status === 429 ||
+          (hasJsonRpcError && isDegradedRpcError({ value: parsed })),
       };
     } finally {
       clearTimeout(timeout);

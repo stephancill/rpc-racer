@@ -114,7 +114,9 @@ Example single request:
 - `x-rpc-fallback`: present with value `alchemy` when fallback was used
 - `x-rpc-alchemy-attempted`: present on upstream error responses with whether Alchemy fallback was attempted
 
-When every public RPC returns an error, the first valid JSON-RPC error body and its HTTP status are returned unchanged. Alchemy is attempted first for transport failures, provider degradation such as rate limits, or likely state-availability errors.
+Only HTTP `2xx` responses without JSON-RPC errors can win the public RPC race. A failed HTTP response with an error incorrectly encoded under `result` is treated as a transport failure: the race continues and the upstream is marked degraded.
+
+When every public RPC returns an error, the first valid JSON-RPC error body and its HTTP status are returned unchanged. Alchemy is attempted first for transport failures, provider degradation (including HTTP `401`, `403`, `429`, and `5xx`), or likely state-availability errors. Genuine JSON-RPC request/execution errors at HTTP `200` or `400` do not by themselves mark a provider degraded.
 
 ## Example Calls
 
@@ -161,12 +163,13 @@ curl -sS "https://evm.stupidtech.net/v1/chains"
 1. Install dependencies: `bun install`
 2. Run local dev server: `bun run dev`
 3. Run checks before pushing: `bun run check`
-4. Optional benchmark: `bun run benchmark`
-5. Consistency integration test (Milestone 0): set `INTERNAL_SECRET` and run
+4. Run regression tests: `bun run test`
+5. Optional benchmark: `bun run benchmark`
+6. Consistency integration test (Milestone 0): set `INTERNAL_SECRET` and run
    `bun run integration -- --fan-out 1 [--burst 5]` — verifies `eth_getLogs` by
    exact block hash is consistent and receipt hashes match across Ethereum,
    Base, Optimism, and Arbitrum.
-6. Open a PR to `main`
+7. Open a PR to `main`
 
 Notes:
 

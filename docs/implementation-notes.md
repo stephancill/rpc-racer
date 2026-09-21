@@ -3,6 +3,33 @@
 Working notes for the `rpc-racer` Cloudflare Worker. Any implementation change
 should be reflected here before committing.
 
+## 2026-09-21 — Reject failed HTTP responses as RPC race winners
+
+- Production balance testing reproduced HTTP `503` responses from
+  `rpc.eth.gateway.fm` with `{ code: 503, message: "server unavailable" }` under
+  `result`. The race accepted these as successes, aborted healthy candidates,
+  skipped Alchemy fallback, and recorded the failed upstream as healthy.
+- Reject non-`2xx` responses without a JSON-RPC error object as transport
+  failures. Existing race handling then continues with other candidates, marks
+  the upstream degraded, and enables Alchemy fallback if no candidate succeeds.
+- Treat HTTP `401`, `403`, `429`, and `5xx` as provider degradation even when a
+  genuine JSON-RPC error body uses a generic message/code. Preserve that error
+  body and status for passthrough if fallback does not supply a response.
+- Preserve genuine JSON-RPC request/execution errors at HTTP `200`/`400` without
+  marking the upstream degraded just because the request failed.
+- Add `bun run test` and focused race regression tests covering native balances,
+  USDC calls, batches, fallback eligibility, provider health, and error
+  passthrough. Export the race helper for direct tests without live RPC traffic.
+- Document response behavior and the regression-test command in the README.
+
+### Verified
+
+- Before the fix, 10 regression cases failed; the two genuine-error passthrough
+  cases already passed. All 12 cases pass with the fix.
+- `bun run format`, `bun run lint`, and `git diff --check` pass.
+- `bunx tsc --noEmit` reports only the two previously documented
+  `CacheStorage.default` type errors.
+
 ## 2026-09-21 — Expose chain icon URLs
 
 - Added optional `iconUrl` to normalized chain metadata and both

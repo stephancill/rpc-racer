@@ -9,6 +9,7 @@
     "deploy": "wrangler deploy",
     "lint": "bunx oxlint src",
     "format": "bunx oxfmt --write .",
+    "test": "bun test",
     "check": "bun run lint && bun run format",
     "block-speed": "bun scripts/block-speed.mjs",
     "fill-block-speeds": "bun scripts/fill-block-speeds.mjs",
