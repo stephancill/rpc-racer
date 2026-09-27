@@ -149,4 +149,46 @@ describe("RPC race HTTP failures", () => {
       expect(result.urlResults).toEqual([{ url: failingUrl, degraded: false }]);
     });
   }
+
+  test("a fast upstream rate limit does not mask a genuine RPC error", async () => {
+    const rateLimitBody = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code: -32005, message: "rate limit exceeded" },
+    });
+    const transactionNotFoundBody = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code: -32000, message: "transaction not found" },
+    });
+    mockUpstreams({ body: rateLimitBody, status: 200, healthyBody: transactionNotFoundBody });
+
+    const result = await runRace({ withHealthy: true });
+
+    expect(result.winner).toBeNull();
+    expect(result.errorResponse).toEqual({
+      url: healthyUrl,
+      body: transactionNotFoundBody,
+      status: 200,
+    });
+    expect(result.shouldTryAlchemyFallback).toBe(true);
+    expect(result.urlResults).toEqual([
+      { url: failingUrl, degraded: true },
+      { url: healthyUrl, degraded: false },
+    ]);
+  });
+
+  test("a provider throttle is still returned when all upstreams are degraded", async () => {
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code: -32005, message: "rate limit exceeded" },
+    });
+    mockUpstreams({ body, status: 200 });
+
+    const result = await runRace();
+
+    expect(result.errorResponse).toEqual({ url: failingUrl, body, status: 200 });
+    expect(result.shouldTryAlchemyFallback).toBe(true);
+  });
 });

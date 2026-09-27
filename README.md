@@ -116,7 +116,7 @@ Example single request:
 
 Only HTTP `2xx` responses without JSON-RPC errors can win the public RPC race. A failed HTTP response with an error incorrectly encoded under `result` is treated as a transport failure: the race continues and the upstream is marked degraded.
 
-When every public RPC returns an error, the first valid JSON-RPC error body and its HTTP status are returned unchanged. Alchemy is attempted first for transport failures, provider degradation (including HTTP `401`, `403`, `429`, and `5xx`), or likely state-availability errors. Genuine JSON-RPC request/execution errors at HTTP `200` or `400` do not by themselves mark a provider degraded.
+When every public RPC returns an error, a genuine node-level JSON-RPC error is preferred over provider auth, rate-limit, or quota errors, regardless of which arrived first. The selected error body and its HTTP status are returned unchanged; when only provider errors are available, the first is returned. Alchemy is attempted first for transport failures, provider degradation (including HTTP `401`, `403`, `429`, and `5xx`), or likely state-availability errors. Genuine JSON-RPC request/execution errors at HTTP `200` or `400` do not by themselves mark a provider degraded.
 
 ## Example Calls
 

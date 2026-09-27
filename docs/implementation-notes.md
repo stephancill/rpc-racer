@@ -3,6 +3,20 @@
 Working notes for the `rpc-racer` Cloudflare Worker. Any implementation change
 should be reflected here before committing.
 
+## 2026-09-27 — Prefer node errors over upstream throttles
+
+- A Base `debug_traceTransaction` call returned `-32005 rate limit exceeded`
+  from a public provider. This was an upstream response, not the Worker's own
+  per-IP limit (which uses HTTP 429). Other public Base nodes disable tracing;
+  the configured Alchemy Base endpoint returned HTTP 429 for exhausted monthly
+  capacity. The queried transaction hash was also absent on Base (confirmed by
+  multiple RPCs and BaseScan).
+- When a race has no success, select the first non-degraded JSON-RPC error
+  before a provider auth/rate-limit/quota error, regardless of arrival order.
+  Keep Alchemy fallback eligibility and upstream error passthrough intact.
+- Add regression coverage for a fast upstream rate limit masking a later node
+  error and for the all-throttled case. Document error preference in the README.
+
 ## 2026-09-27 — Shorten public RPC rate-limit window
 
 - Remove the 60-requests-per-minute sustained limit. Public RPC requests are now

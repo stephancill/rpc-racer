@@ -940,6 +940,8 @@ export async function raceRequests({
     let stateIssueErrorsObserved = 0;
     let degradedErrorsObserved = 0;
     let firstJsonRpcErrorResponse: { url: string; body: string; status: number } | null = null;
+    let firstNonDegradedRpcErrorResponse: { url: string; body: string; status: number } | null =
+      null;
     let firstTransportError: string | null = null;
 
     while (pending.size > 0) {
@@ -962,6 +964,15 @@ export async function raceRequests({
       jsonRpcErrorsObserved += 1;
       if (firstJsonRpcErrorResponse === null) {
         firstJsonRpcErrorResponse = {
+          url: next.value.url,
+          body: next.value.body,
+          status: next.value.status,
+        };
+      }
+      // If every candidate errors, prefer an actual node response over a
+      // provider's auth/rate-limit/quota error regardless of arrival order.
+      if (!next.value.degraded && firstNonDegradedRpcErrorResponse === null) {
+        firstNonDegradedRpcErrorResponse = {
           url: next.value.url,
           body: next.value.body,
           status: next.value.status,
@@ -1010,7 +1021,7 @@ export async function raceRequests({
 
     return {
       winner,
-      errorResponse: firstJsonRpcErrorResponse,
+      errorResponse: firstNonDegradedRpcErrorResponse ?? firstJsonRpcErrorResponse,
       shouldTryAlchemyFallback:
         firstTransportError !== null || stateIssueErrorsObserved > 0 || degradedErrorsObserved > 0,
       urlResults,
