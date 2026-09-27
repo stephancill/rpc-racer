@@ -17,7 +17,6 @@ type Env = {
   METRICS_ANALYTICS?: AnalyticsEngineDataset;
   ASSETS: Fetcher;
   RPC_BURST_RATE_LIMITER: RateLimit;
-  RPC_SUSTAINED_RATE_LIMITER: RateLimit;
 };
 
 type RpcEntry = {
@@ -501,12 +500,8 @@ async function handleRaceRpc({
 
   if (caller === "public") {
     const rateLimitKey = request.headers.get("cf-connecting-ip") ?? "unknown";
-    const [burstLimit, sustainedLimit] = await Promise.all([
-      env.RPC_BURST_RATE_LIMITER.limit({ key: rateLimitKey }),
-      env.RPC_SUSTAINED_RATE_LIMITER.limit({ key: rateLimitKey }),
-    ]);
-    if (!burstLimit.success || !sustainedLimit.success) {
-      const retryAfterSeconds = sustainedLimit.success ? 10 : 60;
+    const { success } = await env.RPC_BURST_RATE_LIMITER.limit({ key: rateLimitKey });
+    if (!success) {
       return finalizeRpcResponse({
         env,
         ctx,
@@ -518,7 +513,7 @@ async function handleRaceRpc({
           {
             status: 429,
             headers: {
-              "retry-after": String(retryAfterSeconds),
+              "retry-after": "10",
             },
           },
         ),

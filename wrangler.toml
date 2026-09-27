@@ -24,14 +24,6 @@ namespace_id = "928341001"
 limit = 60
 period = 10
 
-[[ratelimits]]
-name = "RPC_SUSTAINED_RATE_LIMITER"
-namespace_id = "928341002"
-
-[ratelimits.simple]
-limit = 60
-period = 60
-
 [[analytics_engine_datasets]]
 binding = "METRICS_ANALYTICS"
 dataset = "rpc_racer_metrics"

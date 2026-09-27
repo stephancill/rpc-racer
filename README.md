@@ -32,7 +32,7 @@ Production base URL: `https://evm.stupidtech.net`
 
 - `POST /v1/:chain`
   - Proxies one JSON-RPC request.
-  - Rate limited per source IP to 60 requests per 10 seconds and 60 requests per minute.
+  - Rate limited per source IP to 60 requests per 10 seconds.
   - `:chain` can be:
     - numeric chain ID (for example `1`, `8453`, `42161`)
     - chain alias (for example `ethereum`, `base`, `arbitrum`, `tempo`)
@@ -155,7 +155,7 @@ curl -sS "https://evm.stupidtech.net/v1/chains"
 - `400`: invalid chain selector, query params, JSON body, or an upstream JSON-RPC error using HTTP 400
 - `404`: unknown route or unknown chain
 - `405`: method not allowed for endpoint
-- `429`: rate limit exceeded; includes a `Retry-After` header. Contact `hi@stupidtech.net` if you need higher rate limits.
+- `429`: rate limit exceeded; includes `Retry-After: 10`. Contact `hi@stupidtech.net` if you need higher rate limits.
 - `502`: no successful race result, or fallback conditions were not met, or fallback did not produce a result
 
 ## Contributing

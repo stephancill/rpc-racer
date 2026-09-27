@@ -3,6 +3,13 @@
 Working notes for the `rpc-racer` Cloudflare Worker. Any implementation change
 should be reflected here before committing.
 
+## 2026-09-27 — Shorten public RPC rate-limit window
+
+- Remove the 60-requests-per-minute sustained limit. Public RPC requests are now
+  limited only to 60 requests per source IP per 10 seconds.
+- Return `Retry-After: 10` on rate-limited responses. Update the README and
+  landing-page fair use policy to reflect the single window.
+
 ## 2026-09-21 — Reject failed HTTP responses as RPC race winners
 
 - Production balance testing reproduced HTTP `503` responses from
