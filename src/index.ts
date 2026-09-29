@@ -837,7 +837,7 @@ async function tryAlchemyFallback({
 
     const body = await response.text();
     const parsed = safeJsonParse({ value: body });
-    if (!isJsonRpcResponse({ value: parsed })) {
+    if (!isJsonRpcResponse({ value: parsed }) || isDegradedRpcError({ value: parsed })) {
       return null;
     }
 
@@ -1021,7 +1021,10 @@ export async function raceRequests({
 
     return {
       winner,
-      errorResponse: firstNonDegradedRpcErrorResponse ?? firstJsonRpcErrorResponse,
+      // Provider-level denials are not node answers. If every upstream refuses
+      // the request, let the caller return a gateway failure instead of leaking
+      // a random provider's plan, authentication, or quota error.
+      errorResponse: firstNonDegradedRpcErrorResponse,
       shouldTryAlchemyFallback:
         firstTransportError !== null || stateIssueErrorsObserved > 0 || degradedErrorsObserved > 0,
       urlResults,
@@ -1493,7 +1496,11 @@ function isDegradedRpcError({ value }: { value: unknown }): boolean {
     if (candidate.error.code === 403 || candidate.error.code === 429) {
       return true;
     }
-    if (candidate.error.code === -32005 || candidate.error.code === -32006) {
+    if (
+      candidate.error.code === -32005 ||
+      candidate.error.code === -32006 ||
+      candidate.error.code === -16401
+    ) {
       return true;
     }
   }

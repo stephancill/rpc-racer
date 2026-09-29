@@ -3,6 +3,19 @@
 Working notes for the `rpc-racer` Cloudflare Worker. Any implementation change
 should be reflected here before committing.
 
+## 2026-09-29 — Do not expose upstream paid-plan denials
+
+- A Base `eth_call` could return Tatum's `-16401` paid-plan error when no public
+  endpoint succeeded and the Alchemy fallback was unavailable. The error was
+  already classified as degraded by its subscription wording, but the last-resort
+  passthrough still selected it.
+- Return a generic HTTP 502 when all public RPC errors are provider-level denials
+  and Alchemy does not provide a usable answer. Preserve passthrough for genuine
+  node-level errors and prefer those over provider denials. Explicitly classify
+  Tatum's `-16401` code even if the provider changes its wording.
+- Reject provider-level JSON-RPC errors from Alchemy's fallback as well, including
+  denials conveyed with HTTP 200. Document the resulting response semantics.
+
 ## 2026-09-27 — Prefer node errors over upstream throttles
 
 - A Base `debug_traceTransaction` call returned `-32005 rate limit exceeded`

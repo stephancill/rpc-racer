@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { raceRequests } from "./index.ts";
+import worker, { raceRequests } from "./index.ts";
 
 const failingUrl = "https://failing.example";
 const healthyUrl = "https://healthy.example";
@@ -115,7 +115,7 @@ describe("RPC race HTTP failures", () => {
   });
 
   for (const status of [401, 403, 429, 500, 503]) {
-    test(`HTTP ${status} enables fallback even with a generic JSON-RPC error`, async () => {
+    test(`HTTP ${status} enables fallback without passing through a generic provider error`, async () => {
       const body = JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
@@ -126,8 +126,9 @@ describe("RPC race HTTP failures", () => {
       const result = await runRace();
 
       expect(result.winner).toBeNull();
-      expect(result.errorResponse).toEqual({ url: failingUrl, body, status });
+      expect(result.errorResponse).toBeNull();
       expect(result.shouldTryAlchemyFallback).toBe(true);
+      expect(result.failure).toEqual({ message: "All upstream RPCs returned errors" });
       expect(result.urlResults).toEqual([{ url: failingUrl, degraded: true }]);
     });
   }
@@ -178,7 +179,7 @@ describe("RPC race HTTP failures", () => {
     ]);
   });
 
-  test("a provider throttle is still returned when all upstreams are degraded", async () => {
+  test("a provider throttle is not returned when all upstreams are degraded", async () => {
     const body = JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
@@ -188,7 +189,96 @@ describe("RPC race HTTP failures", () => {
 
     const result = await runRace();
 
-    expect(result.errorResponse).toEqual({ url: failingUrl, body, status: 200 });
+    expect(result.errorResponse).toBeNull();
     expect(result.shouldTryAlchemyFallback).toBe(true);
+    expect(result.failure).toEqual({ message: "All upstream RPCs returned errors" });
+    expect(result.urlResults).toEqual([{ url: failingUrl, degraded: true }]);
   });
+
+  test("Tatum's paid-plan eth_call denial is degraded even without a subscription message", async () => {
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      error: { code: -16401, message: "Method 'eth_call' is available for paid plans only." },
+    });
+    mockUpstreams({ body, status: 200 });
+
+    const result = await runRace({ payload: tokenRequest });
+
+    expect(result.winner).toBeNull();
+    expect(result.errorResponse).toBeNull();
+    expect(result.shouldTryAlchemyFallback).toBe(true);
+    expect(result.urlResults).toEqual([{ url: failingUrl, degraded: true }]);
+  });
+});
+
+test("the public endpoint fails when public and fallback providers deny access", async () => {
+  const originalCaches = globalThis.caches;
+  globalThis.caches = {
+    default: { match: async () => undefined, put: async () => {} },
+  };
+  fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+    if (url === "https://chainlist.example/rpcs.json") {
+      return Response.json([
+        { chainId: 8453, name: "Base", rpc: [{ url: "https://base-mainnet.gateway.tatum.io" }] },
+      ]);
+    }
+    if (url === "https://base-mainnet.gateway.tatum.io") {
+      return Response.json({
+        jsonrpc: "2.0",
+        id: 2,
+        error: { code: -16401, message: "Method 'eth_call' is available for paid plans only." },
+      });
+    }
+    if (url === "https://config.example/networks") {
+      return Response.json({
+        result: {
+          data: [
+            { networkChainId: 8453, kebabCaseId: "base-mainnet", supportedProducts: ["node-api"] },
+          ],
+        },
+      });
+    }
+    if (url === "https://base-mainnet.g.alchemy.com/v2/test-key") {
+      return Response.json({
+        jsonrpc: "2.0",
+        id: 2,
+        error: { code: 429, message: "Monthly capacity limit exceeded" },
+      });
+    }
+    throw new Error(`Unexpected upstream: ${url}`);
+  });
+
+  try {
+    const env = {
+      CHAINLIST_RPCS_URL: "https://chainlist.example/rpcs.json",
+      ALCHEMY_NETWORK_CONFIG_URL: "https://config.example/networks",
+      ALCHEMY_API_KEY: "test-key",
+      RPC_BURST_RATE_LIMITER: { limit: async () => ({ success: true }) },
+      METRICS_DO: {
+        idFromName: () => "global",
+        get: () => ({ fetch: async () => Response.json({ blocked: {} }) }),
+      },
+    };
+    const response = await worker.fetch(
+      new Request("https://evm.stupidtech.net/v1/8453", {
+        method: "POST",
+        body: JSON.stringify(tokenRequest),
+      }),
+      env,
+      { waitUntil: () => {} },
+    );
+
+    expect(response.status).toBe(502);
+    expect(response.headers.get("x-rpc-error-source")).toBe("upstream");
+    expect(response.headers.get("x-rpc-alchemy-attempted")).toBe("true");
+    expect(await response.json()).toEqual({
+      error: "All upstream RPCs returned errors",
+      chainId: 8453,
+      tried: 1,
+    });
+  } finally {
+    if (originalCaches === undefined) delete globalThis.caches;
+    else globalThis.caches = originalCaches;
+  }
 });
