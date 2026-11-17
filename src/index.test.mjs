@@ -172,11 +172,41 @@ describe("RPC race HTTP failures", () => {
       body: transactionNotFoundBody,
       status: 200,
     });
-    expect(result.shouldTryAlchemyFallback).toBe(true);
+    // A genuine node answer is authoritative, so Alchemy is not worth paying for.
+    expect(result.shouldTryAlchemyFallback).toBe(false);
     expect(result.urlResults).toEqual([
       { url: failingUrl, degraded: true },
       { url: healthyUrl, degraded: false },
     ]);
+  });
+
+  test("a dead upstream does not trigger Alchemy when a node rejects the request", async () => {
+    const nonceTooLowBody = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code: -32000, message: "nonce too low" },
+    });
+    mockUpstreams({ body: "<html>bad gateway</html>", status: 502, healthyBody: nonceTooLowBody });
+
+    const result = await runRace({ withHealthy: true });
+
+    expect(result.winner).toBeNull();
+    expect(result.errorResponse).toEqual({ url: healthyUrl, body: nonceTooLowBody, status: 200 });
+    expect(result.shouldTryAlchemyFallback).toBe(false);
+  });
+
+  test("a missing-state error alongside a dead upstream still triggers Alchemy", async () => {
+    const missingStateBody = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code: -32000, message: "missing trie node abc" },
+    });
+    mockUpstreams({ body: "<html>bad gateway</html>", status: 502, healthyBody: missingStateBody });
+
+    const result = await runRace({ withHealthy: true });
+
+    expect(result.winner).toBeNull();
+    expect(result.shouldTryAlchemyFallback).toBe(true);
   });
 
   test("a provider throttle is not returned when all upstreams are degraded", async () => {
@@ -277,6 +307,71 @@ test("the public endpoint fails when public and fallback providers deny access",
       chainId: 8453,
       tried: 1,
     });
+  } finally {
+    if (originalCaches === undefined) delete globalThis.caches;
+    else globalThis.caches = originalCaches;
+  }
+});
+
+test("eth_sendRawTransaction is never retried on Alchemy", async () => {
+  const originalCaches = globalThis.caches;
+  globalThis.caches = {
+    default: { match: async () => undefined, put: async () => {} },
+  };
+  const alchemyCalls = [];
+  fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+    if (url === "https://chainlist.example/rpcs.json") {
+      return Response.json([
+        { chainId: 8453, name: "Base", rpc: [{ url: "https://base-mainnet.gateway.tatum.io" }] },
+      ]);
+    }
+    if (url === "https://base-mainnet.gateway.tatum.io") {
+      return new Response("<html>bad gateway</html>", { status: 502 });
+    }
+    if (url === "https://config.example/networks") {
+      return Response.json({
+        result: {
+          data: [
+            { networkChainId: 8453, kebabCaseId: "base-mainnet", supportedProducts: ["node-api"] },
+          ],
+        },
+      });
+    }
+    if (String(url).includes(".g.alchemy.com")) {
+      alchemyCalls.push(url);
+      return Response.json({ jsonrpc: "2.0", id: 1, result: "0xabc" });
+    }
+    throw new Error(`Unexpected upstream: ${url}`);
+  });
+
+  try {
+    const env = {
+      CHAINLIST_RPCS_URL: "https://chainlist.example/rpcs.json",
+      ALCHEMY_NETWORK_CONFIG_URL: "https://config.example/networks",
+      ALCHEMY_API_KEY: "test-key",
+      RPC_BURST_RATE_LIMITER: { limit: async () => ({ success: true }) },
+      METRICS_DO: {
+        idFromName: () => "global",
+        get: () => ({ fetch: async () => Response.json({ blocked: {} }) }),
+      },
+    };
+    const response = await worker.fetch(
+      new Request("https://evm.stupidtech.net/v1/8453", {
+        method: "POST",
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "eth_sendRawTransaction",
+          params: ["0x02"],
+        }),
+      }),
+      env,
+      { waitUntil: () => {} },
+    );
+
+    expect(response.status).toBe(502);
+    expect(response.headers.get("x-rpc-alchemy-attempted")).toBe("false");
+    expect(alchemyCalls).toEqual([]);
   } finally {
     if (originalCaches === undefined) delete globalThis.caches;
     else globalThis.caches = originalCaches;

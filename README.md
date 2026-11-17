@@ -7,7 +7,7 @@ Production base URL: `https://evm.stupidtech.net`
 `evm.stupidtech.net` is a JSON-RPC proxy that races multiple public RPC providers and returns the first successful response.
 
 - Races 5 random HTTPS RPC endpoints per request
-- Falls back to Alchemy when public RPCs are unavailable, rate-limited, or missing requested state
+- Falls back to Alchemy when public RPCs are unavailable, rate-limited, or missing requested state (never for `eth_sendRawTransaction`)
 - Caches chain metadata from Chainlist and Alchemy network config
 
 ## Endpoints
@@ -116,7 +116,7 @@ Example single request:
 
 Only HTTP `2xx` responses without JSON-RPC errors can win the public RPC race. A failed HTTP response with an error incorrectly encoded under `result` is treated as a transport failure: the race continues and the upstream is marked degraded.
 
-When every public RPC returns an error, a genuine node-level JSON-RPC error is preferred over provider auth, rate-limit, quota, or paid-plan errors, regardless of which arrived first. The selected node error body and its HTTP status are returned unchanged. Alchemy is attempted first for transport failures, provider degradation (including HTTP `401`, `403`, `429`, and `5xx`), or likely state-availability errors. If Alchemy also fails and only provider denials are available, the proxy returns HTTP `502` with a generic failure body instead of passing through a provider's error. Genuine JSON-RPC request/execution errors at HTTP `200` or `400` do not by themselves mark a provider degraded.
+When every public RPC returns an error, a genuine node-level JSON-RPC error is preferred over provider auth, rate-limit, quota, or paid-plan errors, regardless of which arrived first. The selected node error body and its HTTP status are returned unchanged. Alchemy is attempted only when no public RPC returned a genuine node answer, and at least one hit a transport failure, provider degradation (including HTTP `401`, `403`, `429`, and `5xx`), or a likely state-availability error. If any node returned a genuine error (for example `nonce too low` or `execution reverted`), that error is returned without trying Alchemy. `eth_sendRawTransaction` (alone or inside a batch) is never retried on Alchemy, and Alchemy fallback calls are soft-capped per Cloudflare location; when the cap is reached the request behaves as if Alchemy was not attempted. If Alchemy also fails and only provider denials are available, the proxy returns HTTP `502` with a generic failure body instead of passing through a provider's error. Genuine JSON-RPC request/execution errors at HTTP `200` or `400` do not by themselves mark a provider degraded.
 
 ## Example Calls
 

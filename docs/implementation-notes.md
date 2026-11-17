@@ -269,3 +269,30 @@ Tightened:
   summary resets — acceptable for a bounded live dashboard.
 
 </invoke>
+
+## 2026-11-17: stop Alchemy fallback from draining the budget
+
+The Alchemy monthly budget was exhausted on 2026-11-16. Analytics Engine showed
+~1.04M Alchemy fallback calls over 30 days, ~80% of them public
+`eth_sendRawTransaction` requests on Celo (42220) from a client retrying
+transactions that every node rejected. `raceRequests` enabled the fallback if
+*any* candidate had a transport error, so one dead endpoint in a random fanout
+was enough to send an already-rejected transaction to Alchemy.
+
+Changes:
+
+- `raceRequests` only sets `shouldTryAlchemyFallback` when no upstream returned
+  an authoritative node error (non-degraded and not a missing-state error).
+  Missing-state errors (pruned nodes) still trigger the fallback.
+- `NO_ALCHEMY_FALLBACK_METHODS` (`eth_sendRawTransaction`) never falls back,
+  including inside batches.
+- New `ALCHEMY_FALLBACK_RATE_LIMITER` binding (10 calls/60s, key
+  `alchemy-fallback`) soft-caps fallback calls. Cloudflare rate limits are
+  per location, so this is a per-data-center bound rather than a global one.
+  The limiter is only consulted when a fallback would otherwise happen.
+- Block-speed estimation still calls Alchemy directly and is not capped; it is
+  low volume.
+
+Follow-up: internal-route batches (Base, Arbitrum, Polygon) were the next
+largest Alchemy consumer (~158k batch requests/30d, billed per batch item).
+Analytics Engine records one row per batch, so batch size is not visible.

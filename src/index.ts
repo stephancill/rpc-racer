@@ -17,6 +17,8 @@ type Env = {
   METRICS_ANALYTICS?: AnalyticsEngineDataset;
   ASSETS: Fetcher;
   RPC_BURST_RATE_LIMITER: RateLimit;
+  /** Caps paid Alchemy fallback calls so a misbehaving client cannot drain the budget. */
+  ALCHEMY_FALLBACK_RATE_LIMITER?: RateLimit;
 };
 
 type RpcEntry = {
@@ -255,6 +257,10 @@ const jsonRpcSchema = z
   .passthrough();
 
 const DISALLOWED_RPC_METHOD_PREFIXES = ["alchemy_"];
+// Methods never retried on Alchemy. A raw transaction rejected by every public
+// node will be rejected by Alchemy too, and clients that loop on a stuck
+// transaction would otherwise burn paid compute units on every retry.
+const NO_ALCHEMY_FALLBACK_METHODS = new Set(["eth_sendRawTransaction"]);
 
 const chainsArraySchema = z.array(
   z
@@ -558,6 +564,7 @@ async function handleRaceRpc({
   let rpcMethod: string;
   let requestBody: string;
   let jsonRpcId: unknown = null;
+  let allowAlchemyFallback = true;
   if (Array.isArray(parsedBody)) {
     if (parsedBody.length === 0) {
       return finalizeRpcResponse({
@@ -584,6 +591,9 @@ async function handleRaceRpc({
           caller,
         });
       }
+      if (NO_ALCHEMY_FALLBACK_METHODS.has(itemRequest.data.method)) {
+        allowAlchemyFallback = false;
+      }
     }
     rpcMethod = "batch";
     requestBody = JSON.stringify(parsedBody);
@@ -600,6 +610,7 @@ async function handleRaceRpc({
       });
     }
     rpcMethod = validatedBody.data.method;
+    allowAlchemyFallback = !NO_ALCHEMY_FALLBACK_METHODS.has(rpcMethod);
     jsonRpcId = validatedBody.data.id ?? null;
     requestBody = JSON.stringify(validatedBody.data);
   }
@@ -673,7 +684,11 @@ async function handleRaceRpc({
   const urlResults = raceResult.urlResults;
   if (raceResult.winner === null) {
     const hasAlchemyApiKey = Boolean(env.ALCHEMY_API_KEY && env.ALCHEMY_API_KEY.trim().length > 0);
-    const shouldTryAlchemyFallback = raceResult.shouldTryAlchemyFallback && hasAlchemyApiKey;
+    const shouldTryAlchemyFallback =
+      raceResult.shouldTryAlchemyFallback &&
+      allowAlchemyFallback &&
+      hasAlchemyApiKey &&
+      (await isAlchemyFallbackAllowedByRateLimit({ env }));
     const alchemy = shouldTryAlchemyFallback
       ? await tryAlchemyFallback({
           chainId: chain.chainId,
@@ -786,6 +801,16 @@ async function handleRaceRpc({
     method: rpcMethod,
     urlResults,
   });
+}
+
+// Soft spend cap: Cloudflare rate limits are enforced per location, so this
+// bounds Alchemy usage per data center rather than globally.
+async function isAlchemyFallbackAllowedByRateLimit({ env }: { env: Env }): Promise<boolean> {
+  if (env.ALCHEMY_FALLBACK_RATE_LIMITER === undefined) {
+    return true;
+  }
+  const { success } = await env.ALCHEMY_FALLBACK_RATE_LIMITER.limit({ key: "alchemy-fallback" });
+  return success;
 }
 
 async function tryAlchemyFallback({
@@ -939,6 +964,10 @@ export async function raceRequests({
     let jsonRpcErrorsObserved = 0;
     let stateIssueErrorsObserved = 0;
     let degradedErrorsObserved = 0;
+    // Node answers that are authoritative (not a provider denial and not a
+    // pruned/missing-state error). One of these means Alchemy would most likely
+    // give the same answer, so it is not worth paying for a fallback.
+    let authoritativeErrorsObserved = 0;
     let firstJsonRpcErrorResponse: { url: string; body: string; status: number } | null = null;
     let firstNonDegradedRpcErrorResponse: { url: string; body: string; status: number } | null =
       null;
@@ -984,6 +1013,9 @@ export async function raceRequests({
       if (next.value.degraded) {
         degradedErrorsObserved += 1;
       }
+      if (!next.value.degraded && !next.value.likelyStateIssueError) {
+        authoritativeErrorsObserved += 1;
+      }
 
       if (jsonRpcResponsesObserved >= 5 && jsonRpcErrorsObserved >= 5) {
         break;
@@ -1025,8 +1057,14 @@ export async function raceRequests({
       // the request, let the caller return a gateway failure instead of leaking
       // a random provider's plan, authentication, or quota error.
       errorResponse: firstNonDegradedRpcErrorResponse,
+      // Only pay for Alchemy when no upstream gave an authoritative node answer.
+      // A dead or throttled endpoint elsewhere in the fanout does not make a
+      // genuine node rejection (e.g. `nonce too low`) worth retrying.
       shouldTryAlchemyFallback:
-        firstTransportError !== null || stateIssueErrorsObserved > 0 || degradedErrorsObserved > 0,
+        authoritativeErrorsObserved === 0 &&
+        (firstTransportError !== null ||
+          stateIssueErrorsObserved > 0 ||
+          degradedErrorsObserved > 0),
       urlResults,
       ...(failure !== undefined && { failure }),
     };
